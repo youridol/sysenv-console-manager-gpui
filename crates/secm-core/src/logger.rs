@@ -36,6 +36,12 @@ impl LogBuffer {
         })
     }
 
+    /// 进程级全局日志缓冲（Logs 页与各处日志共享）
+    pub fn global() -> &'static Arc<Self> {
+        static G: std::sync::OnceLock<Arc<LogBuffer>> = std::sync::OnceLock::new();
+        G.get_or_init(Self::new)
+    }
+
     pub fn append(&self, level: &str, module: &str, message: &str) {
         let ts = now_ts();
         let entry = LogEntry {
