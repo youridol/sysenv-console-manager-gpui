@@ -1,0 +1,20 @@
+[package]
+name = "secm-core"
+version.workspace = true
+description = "SECM GPUI 重构 — 业务逻辑层（采集编排/系统操作，无 UI 依赖）"
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "secm_core"
+crate-type = ["lib"]
+
+[dependencies]
+secm-datasource.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+log.workspace = true
+ureq.workspace = true
+sysinfo = "0.30"
+windows-sys = { workspace = true }

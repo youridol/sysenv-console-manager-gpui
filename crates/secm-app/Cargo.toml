@@ -1,0 +1,12 @@
+[package]
+name = "secm-app"
+version.workspace = true
+description = "SECM GPUI 重构 — 桌面应用二进制（GPUI UI + 装配）"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+secm-core = { path = "../secm-core" }
+gpui.workspace = true
+tray-icon = "0.24"
+muda = "0.19"

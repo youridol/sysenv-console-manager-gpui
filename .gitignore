@@ -1,0 +1,17 @@
+# Rust 构建产物
+/target
+**/*.rs.bk
+
+# 本地数据（运行时生成，不入库）
+*.log
+appdata/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 系统
+Thumbs.db
+Desktop.ini
+.DS_Store
