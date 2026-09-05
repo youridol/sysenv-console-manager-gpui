@@ -3,6 +3,7 @@
 // 阶段进度：v2.0.0 骨架 → Phase 1 起逐模块迁入。
 
 pub mod error;
+pub mod lhm;
 pub mod logger;
 pub mod sensor;
 pub mod sensor_service;

@@ -1,7 +1,9 @@
 // secm-core::sensor_service — 传感器常驻采集服务（后台线程 1s 轮询 → 共享快照）
 // 对齐源 sensor.rs 编排语义：Dashboard 可见时驱动 1s 轮询，UI 订阅最新快照。
 
-use crate::sensor::{CpuData, DiskData, MemoryData, SensorSnapshot};
+use crate::sensor::{
+    CpuData, DiskData, GpuData, MemoryData, MotherboardData, MotherboardSensor, SensorSnapshot,
+};
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::Duration;
@@ -67,10 +69,14 @@ impl SensorService {
     }
 }
 
-/// 采集一帧快照（CPU/内存/磁盘真实采集；GPU/温度链后续阶段接入）
+/// 采集一帧快照（CPU/内存/磁盘真实采集；温度/功耗/GPU 走 LHM sidecar）
 fn collect_snapshot(sys: &mut sysinfo::System) -> SensorSnapshot {
     sys.refresh_cpu_usage();
     sys.refresh_memory();
+
+    // ---- LHM 温度/功耗（主通道；低频 ensure + 2s 缓存读取）----
+    ensure_lhm_periodic();
+    let (lhm_resp, lhm_diag) = crate::lhm::snapshot();
 
     // ---- CPU ----
     let cpus = sys.cpus();
@@ -85,6 +91,27 @@ fn collect_snapshot(sys: &mut sysinfo::System) -> SensorSnapshot {
     let clock_mhz = cpus.first().map(|c| c.frequency() as f32).unwrap_or(0.0);
     let freq_source = if clock_mhz > 0.0 { "sysinfo" } else { "none" };
 
+    // LHM 温度/功耗注入（可用时）
+    let (temperature, temp_source, power_w, power_source, power_estimated) =
+        match &lhm_resp {
+            Some(r) if r.available => {
+                let t = r.cpu.package_temp_c.unwrap_or(0.0);
+                let p = r.cpu.power_w.unwrap_or(0.0);
+                if t > 0.0 {
+                    (
+                        t,
+                        "lhm".to_string(),
+                        p,
+                        if p > 0.0 { "lhm" } else { "estimated" }.to_string(),
+                        p <= 0.0,
+                    )
+                } else {
+                    (0.0, "none".to_string(), 0.0, "estimated".to_string(), true)
+                }
+            }
+            _ => (0.0, "none".to_string(), 0.0, "estimated".to_string(), true),
+        };
+
     let cpu = CpuData {
         name,
         usage,
@@ -92,11 +119,11 @@ fn collect_snapshot(sys: &mut sysinfo::System) -> SensorSnapshot {
         core_count,
         clock_mhz,
         freq_source: freq_source.to_string(),
-        temperature: 0.0, // LHM/WinRing0/ACPI 链：后续阶段
-        power_w: 0.0,
-        temp_source: "none".to_string(),
-        power_source: "estimated".to_string(),
-        power_estimated: true,
+        temperature,
+        power_w,
+        temp_source,
+        power_source,
+        power_estimated,
     };
 
     // ---- 内存 ----
@@ -108,12 +135,59 @@ fn collect_snapshot(sys: &mut sysinfo::System) -> SensorSnapshot {
     } else {
         0.0
     };
-    let memory = MemoryData {
+    let mut memory = MemoryData {
         total: mem_total,
         used: mem_used,
         available: mem_avail,
         usage_percent: mem_pct,
-        model_name: String::new(), // LHM SPD 后续
+        model_name: String::new(),
+    };
+    // LHM 内存型号（SPD）补充
+    if memory.model_name.is_empty() {
+        if let Some(r) = &lhm_resp {
+            if let Some(m) = &r.memory {
+                if let Some(n) = &m.name {
+                    if !n.is_empty() {
+                        memory.model_name = n.clone();
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- GPU（LHM）----
+    let gpu: Vec<GpuData> = match &lhm_resp {
+        Some(r) if r.available => r
+            .gpu
+            .iter()
+            .map(|g| GpuData {
+                name: g.name.clone(),
+                usage: g.load_percent.unwrap_or(0.0),
+                temperature: g.temperature_c.unwrap_or(0.0),
+                memory_used: g.memory_used_bytes.unwrap_or(0),
+                memory_total: g.memory_total_bytes.unwrap_or(0),
+                clock_mhz: g.core_clock_mhz.unwrap_or(0.0),
+                power_w: g.power_w.unwrap_or(0.0),
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+
+    // ---- 主板（LHM）----
+    let motherboard = match &lhm_resp {
+        Some(r) => r.motherboard.clone().map(|m| MotherboardData {
+            name: m.name.clone(),
+            sensors: m
+                .sensors
+                .iter()
+                .map(|s| MotherboardSensor {
+                    name: s.name.clone(),
+                    kind: s.kind.clone(),
+                    value: s.value,
+                })
+                .collect(),
+        }),
+        None => None,
     };
 
     // ---- 磁盘（挂载点摘要）----
@@ -138,8 +212,8 @@ fn collect_snapshot(sys: &mut sysinfo::System) -> SensorSnapshot {
         });
     }
 
-    // ---- 诊断串（GPU/温度未接阶段）----
-    let diag = format!(
+    // ---- 诊断串 ----
+    let mut diag = format!(
         "CPU={:.1}% FREQ={:.0}({}) mem={:.0}% disks={}",
         usage,
         clock_mhz,
@@ -147,13 +221,31 @@ fn collect_snapshot(sys: &mut sysinfo::System) -> SensorSnapshot {
         mem_pct,
         disks.len()
     );
+    if cpu.temperature <= 0.0 && !lhm_diag.is_empty() {
+        diag.push_str(&format!(" TEMP=n/a({})", lhm_diag));
+    }
 
     SensorSnapshot {
         cpu,
-        gpu: Vec::new(),
+        gpu,
         memory,
         disks,
-        motherboard: None,
+        motherboard,
         diag,
+    }
+}
+
+/// LHM 低频 ensure（10s 节流：探测/启动开销不随 1s 轮询放大）
+fn ensure_lhm_periodic() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last = LAST.load(Ordering::Relaxed);
+    if now.saturating_sub(last) >= 10 {
+        LAST.store(now, Ordering::Relaxed);
+        crate::lhm::ensure_running();
     }
 }
