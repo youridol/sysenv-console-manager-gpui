@@ -6,6 +6,7 @@ pub mod cleanup;
 pub mod error;
 pub mod lhm;
 pub mod logger;
+pub mod network;
 pub mod sensor;
 pub mod sensor_service;
 pub mod settings;
