@@ -1309,7 +1309,22 @@ fn clean_version(cmd: &str, raw: &str) -> String {
         for suffix in [" ", " v", " version "] {
             let prefix = format!("{}{}", v, suffix);
             if lower.starts_with(&prefix.to_lowercase()) {
-                stripped = s[prefix.len()..].trim().to_string();
+                let rest = s[prefix.len()..].trim().to_string();
+                // 仅当剩余内容像版本（数字 / v+数字 开头）才剥离工具名前缀；
+                // 否则为普通描述文本（如 "grok command line tool"），保留原文
+                let rest_bytes = rest.as_bytes();
+                let looks_like_version = rest_bytes
+                    .first()
+                    .map(|c| c.is_ascii_digit())
+                    .unwrap_or(false)
+                    || (rest_bytes.first() == Some(&b'v')
+                        && rest_bytes
+                            .get(1)
+                            .map(|c| c.is_ascii_digit())
+                            .unwrap_or(false));
+                if looks_like_version {
+                    stripped = rest;
+                }
                 break;
             }
         }
@@ -1333,11 +1348,9 @@ fn clean_version(cmd: &str, raw: &str) -> String {
             i += 1;
         }
         if bytes[i].is_ascii_digit() {
-            let start = if i > 0 && s.as_bytes()[i - 1] == b'v' {
-                i - 1
-            } else {
-                i
-            };
+            // v 前缀已在上一分支跳过（i 指向首数字），版本号自数字起，
+            // 不包含 v（"v1.2.3" → "1.2.3"，与"可选 v 前缀"语义一致）
+            let start = i;
             let rest = &s[start..];
             // 版本号字符集：数字/./-（预发布）+ 字母（如 rc.6、beta.2）
             let end = rest
