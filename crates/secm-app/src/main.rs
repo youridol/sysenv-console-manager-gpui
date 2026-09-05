@@ -31,23 +31,29 @@ fn main() {
         );
 
         // 系统托盘：后台线程 + 动作通道；主线程消费（显示窗口 / 退出）
+        // 注意：必须用非阻塞 try_recv + 定时轮询——GPUI 前台任务跑在主线程消息循环上，
+        // 若阻塞 recv() 会 park 主线程导致窗口无响应（空白窗体 BUG 根因）。
         let tray_rx = tray::spawn_tray();
         cx.spawn(async move |cx: &mut AsyncApp| {
             loop {
-                match tray_rx.recv() {
-                    Ok(tray::TrayAction::ShowWindow) => {
-                        let _ = cx.update(|app| {
-                            app.activate(false);
-                        });
+                // 非阻塞取出当前已排队的动作（无则立即让出主线程）
+                while let Ok(action) = tray_rx.try_recv() {
+                    match action {
+                        tray::TrayAction::ShowWindow => {
+                            let _ = cx.update(|app| {
+                                app.activate(false);
+                            });
+                        }
+                        tray::TrayAction::Quit => {
+                            let _ = cx.update(|app| {
+                                app.quit();
+                            });
+                            return;
+                        }
                     }
-                    Ok(tray::TrayAction::Quit) => {
-                        let _ = cx.update(|app| {
-                            app.quit();
-                        });
-                        break;
-                    }
-                    Err(_) => break,
                 }
+                // 让出主线程（托盘动作延迟 ≤ 200ms，可接受）
+                gpui::Timer::after(std::time::Duration::from_millis(200)).await;
             }
         })
         .detach();
