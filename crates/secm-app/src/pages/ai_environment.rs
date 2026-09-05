@@ -1,6 +1,11 @@
-// secm-app::pages::ai_environment — AI 环境页（Phase 5）
+// secm-app::pages::ai_environment — AI 环境页
 // npm 环境 + AI 工具管理（白名单安装/升级/卸载）+ MCP 服务器管理 + Skills/扩展扫描。
-// 检测与安装均执行外部 npm 命令 → 一律后台线程执行，操作后自动重扫。
+//
+// 并发模型（多线程、互不阻塞）：
+// - 四组检测（npm/工具/MCP/扩展）各自独立后台任务并发执行，互不等待；
+// - 检测结果在后台线程算好、经 WeakEntity 回 UI 直接赋值（主线程绝不重跑查询）；
+// - 安装/升级/卸载为外部命令操作，独立互斥锁防并发执行，但不断言 UI 线程；
+// - 主线程仅做状态赋值与 cx.notify()。
 
 use gpui::prelude::*;
 use gpui::{div, px, rgb, SharedString, Window, Context, Render, WeakEntity};
@@ -10,46 +15,45 @@ use secm_core::environment::{
 
 use crate::theme::Theme;
 
-/// 后台操作类型（统一进度/结果反馈）
-#[derive(Debug, Clone, PartialEq)]
-enum AiOp {
-    CheckTools,
-    CheckNpm,
-    CheckMcp,
-    CheckExt,
-    InstallTool(String),
-    UpgradeTool(String),
-    UninstallTool(String),
-    InstallMcp(String),
-    UninstallMcp(String),
+/// 检测区（每组独立加载状态，可并发）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetectKind {
+    Npm,
+    Tools,
+    Mcp,
+    Ext,
 }
 
-impl AiOp {
-    fn label(&self) -> String {
-        match self {
-            Self::CheckTools => "检测 AI 工具".to_string(),
-            Self::CheckNpm => "检测 npm 环境".to_string(),
-            Self::CheckMcp => "检测 MCP 服务器".to_string(),
-            Self::CheckExt => "扫描 Skills/扩展".to_string(),
-            Self::InstallTool(p) | Self::UpgradeTool(p) => format!("安装/升级 {}", p),
-            Self::UninstallTool(p) => format!("卸载 {}", p),
-            Self::InstallMcp(p) => format!("安装 MCP {}", p),
-            Self::UninstallMcp(p) => format!("卸载 MCP {}", p),
-        }
-    }
+/// 工具区操作（npm install -g / uninstall，外部命令）
+#[derive(Debug, Clone)]
+enum ToolAction {
+    Install(String),
+    Upgrade(String),
+    Uninstall(String),
+}
+
+/// MCP 操作（npm install -g / uninstall，外部命令）
+#[derive(Debug, Clone)]
+enum McpAction {
+    Install(String),
+    Uninstall(String),
 }
 
 pub struct AiEnvironmentView {
-    /// npm 环境（node/npm 版本）
+    /// npm 环境
     npm: Option<NpmEnvironment>,
-    /// AI 工具（含最新版本与可升级标记）
+    npm_loading: bool,
+    /// AI 工具
     tools: Vec<AiTool>,
+    tools_loading: bool,
     /// MCP 服务器
     mcps: Vec<McpServerInfo>,
+    mcps_loading: bool,
     /// Skills/扩展
     extensions: Vec<AiExtension>,
-    /// 正在执行的操作（None=空闲）
-    busy: Option<AiOp>,
+    ext_loading: bool,
+    /// 操作互斥（安装/卸载类命令串行，防并发 npm 写）
+    action_busy: bool,
     /// 状态/结果消息
     status: String,
 }
@@ -58,90 +62,83 @@ impl AiEnvironmentView {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let mut v = Self {
             npm: None,
+            npm_loading: false,
             tools: Vec::new(),
+            tools_loading: false,
             mcps: Vec::new(),
+            mcps_loading: false,
             extensions: Vec::new(),
-            busy: None,
+            ext_loading: false,
+            action_busy: false,
             status: String::new(),
         };
-        // 初始并行跑四组检测（后台）
-        v.run_op(AiOp::CheckNpm, cx);
-        v.run_op(AiOp::CheckTools, cx);
-        v.run_op(AiOp::CheckMcp, cx);
-        v.run_op(AiOp::CheckExt, cx);
+        // 四组检测并发启动（各自独立后台任务）
+        v.start_detect(DetectKind::Npm, cx);
+        v.start_detect(DetectKind::Tools, cx);
+        v.start_detect(DetectKind::Mcp, cx);
+        v.start_detect(DetectKind::Ext, cx);
         v
     }
 
-    /// 后台执行操作（检测或安装/卸载；完成后重扫受影响列表）
-    fn run_op(&mut self, op: AiOp, cx: &mut Context<Self>) {
-        if self.busy.is_some() {
+    // ------------------------------------------------------------------
+    // 检测（每组独立并发；结果后台算好回填，主线程不重跑）
+    // ------------------------------------------------------------------
+
+    fn loading_of(&self, kind: DetectKind) -> bool {
+        match kind {
+            DetectKind::Npm => self.npm_loading,
+            DetectKind::Tools => self.tools_loading,
+            DetectKind::Mcp => self.mcps_loading,
+            DetectKind::Ext => self.ext_loading,
+        }
+    }
+
+    fn mark_loading(&mut self, kind: DetectKind, loading: bool) {
+        match kind {
+            DetectKind::Npm => self.npm_loading = loading,
+            DetectKind::Tools => self.tools_loading = loading,
+            DetectKind::Mcp => self.mcps_loading = loading,
+            DetectKind::Ext => self.ext_loading = loading,
+        }
+    }
+
+    fn any_loading(&self) -> bool {
+        self.npm_loading || self.tools_loading || self.mcps_loading || self.ext_loading
+    }
+
+    /// 启动一组检测（已有同组在跑则忽略；每组独立，可并发四组）
+    fn start_detect(&mut self, kind: DetectKind, cx: &mut Context<Self>) {
+        if self.loading_of(kind) {
             return;
         }
-        self.busy = Some(op.clone());
-        self.status = format!("{}…", op.label());
+        self.mark_loading(kind, true);
         cx.notify();
 
         let weak: WeakEntity<Self> = cx.entity().downgrade();
         cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
             let exec = cx.background_executor().clone();
+            // 阻塞查询全部在后台线程执行
             let result = exec
                 .spawn(async move {
-                    let op_for_label = op.label();
-                    let exec_res: Result<String, String> = match &op {
-                        AiOp::CheckTools => {
-                            let _ = environment::check_ai_tools();
-                            Ok(String::new())
+                    match kind {
+                        DetectKind::Npm => DetectOutcome::Npm(environment::check_npm_environment()),
+                        DetectKind::Tools => {
+                            DetectOutcome::Tools(environment::check_ai_tools().tools)
                         }
-                        AiOp::CheckNpm => {
-                            let _ = environment::check_npm_environment();
-                            Ok(String::new())
-                        }
-                        AiOp::CheckMcp => {
-                            let _ = environment::list_mcp_servers();
-                            Ok(String::new())
-                        }
-                        AiOp::CheckExt => {
-                            let _ = environment::list_extensions();
-                            Ok(String::new())
-                        }
-                        AiOp::InstallTool(p) => environment::install_or_upgrade_tool(p),
-                        AiOp::UpgradeTool(p) => environment::install_or_upgrade_tool(p),
-                        AiOp::UninstallTool(p) => environment::uninstall_ai_tool(p),
-                        AiOp::InstallMcp(p) => environment::install_mcp_server(p),
-                        AiOp::UninstallMcp(p) => environment::uninstall_mcp_server(p),
-                    };
-                    (op, op_for_label, exec_res)
+                        DetectKind::Mcp => DetectOutcome::Mcp(environment::list_mcp_servers()),
+                        DetectKind::Ext => DetectOutcome::Ext(environment::list_extensions()),
+                    }
                 })
                 .await;
 
             if let Some(view) = weak.upgrade() {
                 view.update(cx, |this, cx| {
-                    let (done_op, label, res) = result;
-                    this.busy = None;
-                    this.status = match res {
-                        Ok(msg) => {
-                            if msg.is_empty() {
-                                format!("{}完成", label)
-                            } else {
-                                msg
-                            }
-                        }
-                        Err(e) => format!("{}失败：{}", label, e),
-                    };
-                    // 操作后重扫相关列表
-                    match done_op {
-                        AiOp::CheckTools | AiOp::InstallTool(_) | AiOp::UpgradeTool(_) | AiOp::UninstallTool(_) => {
-                            this.tools = environment::check_ai_tools().tools;
-                        }
-                        AiOp::CheckNpm => {
-                            this.npm = Some(environment::check_npm_environment());
-                        }
-                        AiOp::CheckMcp | AiOp::InstallMcp(_) | AiOp::UninstallMcp(_) => {
-                            this.mcps = environment::list_mcp_servers();
-                        }
-                        AiOp::CheckExt => {
-                            this.extensions = environment::list_extensions();
-                        }
+                    this.mark_loading(kind, false);
+                    match result {
+                        DetectOutcome::Npm(n) => this.npm = Some(n),
+                        DetectOutcome::Tools(t) => this.tools = t,
+                        DetectOutcome::Mcp(m) => this.mcps = m,
+                        DetectOutcome::Ext(e) => this.extensions = e,
                     }
                     cx.notify();
                 })
@@ -149,6 +146,135 @@ impl AiEnvironmentView {
             }
         })
         .detach();
+    }
+
+    // ------------------------------------------------------------------
+    // 操作（安装/升级/卸载 — 外部命令，独立互斥，串行执行防并发写）
+    // ------------------------------------------------------------------
+
+    /// 工具操作（安装/升级/卸载同一包名语义为 install_or_upgrade）
+    fn run_tool_action(&mut self, action: ToolAction, cx: &mut Context<Self>) {
+        if self.action_busy {
+            return;
+        }
+        self.action_busy = true;
+        self.status = action.status_text();
+        cx.notify();
+
+        let weak: WeakEntity<Self> = cx.entity().downgrade();
+        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+            let exec = cx.background_executor().clone();
+            let action_worker = action.clone();
+            let result = exec
+                .spawn(async move {
+                    match &action_worker {
+                        ToolAction::Install(p) | ToolAction::Upgrade(p) => {
+                            environment::install_or_upgrade_tool(p)
+                        }
+                        ToolAction::Uninstall(p) => environment::uninstall_ai_tool(p),
+                    }
+                })
+                .await;
+
+            if let Some(view) = weak.upgrade() {
+                view.update(cx, |this, cx| {
+                    this.action_busy = false;
+                    this.status = match &result {
+                        Ok(msg) => msg.clone(),
+                        Err(e) => format!("{}：{}", action.label(), e),
+                    };
+                    cx.notify();
+                })
+                .ok();
+                // 操作后后台重扫工具列表（不回主线程重跑）
+                view.update(cx, |this, cx| {
+                    this.start_detect(DetectKind::Tools, cx);
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// MCP 操作
+    fn run_mcp_action(&mut self, action: McpAction, cx: &mut Context<Self>) {
+        if self.action_busy {
+            return;
+        }
+        self.action_busy = true;
+        self.status = action.status_text();
+        cx.notify();
+
+        let weak: WeakEntity<Self> = cx.entity().downgrade();
+        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+            let exec = cx.background_executor().clone();
+            let action_worker = action.clone();
+            let result = exec
+                .spawn(async move {
+                    match &action_worker {
+                        McpAction::Install(p) => environment::install_mcp_server(p),
+                        McpAction::Uninstall(p) => environment::uninstall_mcp_server(p),
+                    }
+                })
+                .await;
+
+            if let Some(view) = weak.upgrade() {
+                view.update(cx, |this, cx| {
+                    this.action_busy = false;
+                    this.status = match &result {
+                        Ok(msg) => msg.clone(),
+                        Err(e) => format!("{}：{}", action.label(), e),
+                    };
+                    cx.notify();
+                })
+                .ok();
+                view.update(cx, |this, cx| {
+                    this.start_detect(DetectKind::Mcp, cx);
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+}
+
+/// 检测后台任务统一产出
+enum DetectOutcome {
+    Npm(NpmEnvironment),
+    Tools(Vec<AiTool>),
+    Mcp(Vec<McpServerInfo>),
+    Ext(Vec<AiExtension>),
+}
+
+impl ToolAction {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Install(_) => "安装",
+            Self::Upgrade(_) => "升级",
+            Self::Uninstall(_) => "卸载",
+        }
+    }
+    fn status_text(&self) -> String {
+        match self {
+            Self::Install(p) | Self::Upgrade(p) | Self::Uninstall(p) => {
+                format!("{} {}…", self.label(), p)
+            }
+        }
+    }
+}
+
+impl McpAction {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Install(_) => "安装 MCP",
+            Self::Uninstall(_) => "卸载 MCP",
+        }
+    }
+    fn status_text(&self) -> String {
+        match self {
+            Self::Install(p) => format!("安装 MCP {}…", p),
+            Self::Uninstall(p) => format!("卸载 MCP {}…", p),
+        }
     }
 }
 
@@ -160,7 +286,7 @@ impl Render for AiEnvironmentView {
         let mcps: Vec<McpServerInfo> = self.mcps.clone();
         let extensions: Vec<AiExtension> = self.extensions.clone();
         let status = self.status.clone();
-        let busy = self.busy.is_some();
+        let action_busy = self.action_busy;
 
         div()
             .flex_col()
@@ -203,14 +329,11 @@ impl Render for AiEnvironmentView {
                             .hover(|s| s.bg(theme.border))
                             .text_color(theme.text)
                             .text_size(px(12.5))
-                            .when(busy, |s| s.text_color(theme.text_muted))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if !busy {
-                                    this.run_op(AiOp::CheckNpm, cx);
-                                    this.run_op(AiOp::CheckTools, cx);
-                                    this.run_op(AiOp::CheckMcp, cx);
-                                    this.run_op(AiOp::CheckExt, cx);
-                                }
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.start_detect(DetectKind::Npm, cx);
+                                this.start_detect(DetectKind::Tools, cx);
+                                this.start_detect(DetectKind::Mcp, cx);
+                                this.start_detect(DetectKind::Ext, cx);
                             }))
                             .child("全部刷新"),
                     ),
@@ -230,17 +353,17 @@ impl Render for AiEnvironmentView {
                 )
             })
             // npm 环境卡
-            .child(self.npm_card(&theme, &npm, busy, cx))
+            .child(self.npm_card(&theme, &npm, cx))
             // AI 工具卡
-            .child(self.tools_card(&theme, &tools, busy, cx))
+            .child(self.tools_card(&theme, &tools, action_busy, cx))
             // MCP 卡 + 扩展卡双列
             .child(
                 div()
                     .grid()
                     .grid_cols(2)
                     .gap_4()
-                    .child(self.mcp_card(&theme, &mcps, busy, cx))
-                    .child(self.ext_card(&theme, &extensions, busy, cx)),
+                    .child(self.mcp_card(&theme, &mcps, action_busy, cx))
+                    .child(self.ext_card(&theme, &extensions, cx)),
             )
     }
 }
@@ -250,9 +373,9 @@ impl AiEnvironmentView {
         &self,
         theme: &Theme,
         npm: &Option<NpmEnvironment>,
-        busy: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let loading = self.npm_loading;
         crate::ui::table_container(theme)
             .child(
                 div()
@@ -279,15 +402,16 @@ impl AiEnvironmentView {
                             .hover(|s| s.bg(theme.border))
                             .text_color(theme.text)
                             .text_size(px(11.5))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if !busy {
-                                    this.run_op(AiOp::CheckNpm, cx);
-                                }
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.start_detect(DetectKind::Npm, cx);
                             }))
-                            .child("刷新"),
+                            .child(if loading { "检测中…" } else { "刷新" }),
                     ),
             )
-            .when(npm.is_none(), |s| {
+            .when(npm.is_none() && !loading, |s| {
+                s.child(crate::ui::table_empty(theme, "点击「刷新」检测 npm 环境"))
+            })
+            .when(npm.is_none() && loading, |s| {
                 s.child(crate::ui::table_empty(theme, "检测中…"))
             })
             .when_some(npm.clone(), |s, n| {
@@ -331,9 +455,10 @@ impl AiEnvironmentView {
         &self,
         theme: &Theme,
         tools: &[AiTool],
-        busy: bool,
+        action_busy: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let loading = self.tools_loading;
         crate::ui::table_container(theme)
             .child(
                 div()
@@ -360,19 +485,17 @@ impl AiEnvironmentView {
                             .hover(|s| s.bg(theme.border))
                             .text_color(theme.text)
                             .text_size(px(11.5))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if !busy {
-                                    this.run_op(AiOp::CheckTools, cx);
-                                }
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.start_detect(DetectKind::Tools, cx);
                             }))
-                            .child("刷新"),
+                            .child(if loading { "检测中…" } else { "刷新" }),
                     ),
             )
-            .when(tools.is_empty() && busy, |s| {
+            .when(tools.is_empty() && loading, |s| {
                 s.child(crate::ui::table_empty(theme, "检测中…（npm 查询）"))
             })
-            .when(tools.is_empty() && !busy, |s| {
-                s.child(crate::ui::table_empty(theme, "暂无数据 — 点击「全部刷新」"))
+            .when(tools.is_empty() && !loading, |s| {
+                s.child(crate::ui::table_empty(theme, "暂无数据 — 点击「刷新」"))
             })
             .children(tools.iter().map(|t| {
                 let tool = t.clone();
@@ -381,9 +504,10 @@ impl AiEnvironmentView {
                 let installed = tool.installed;
                 let version = tool.version.clone();
                 let upgradable = tool.upgradable;
-                let busy_row = busy;
+                let disabled = action_busy;
                 let pkg_upgrade = pkg.clone();
-                let pkg_op = pkg.clone();
+                let pkg_install = pkg.clone();
+                let pkg_uninstall = pkg.clone();
                 div()
                     .id(SharedString::from(format!("ai-tool-{}", tool.name)))
                     .flex()
@@ -427,8 +551,8 @@ impl AiEnvironmentView {
                                 .text_color(rgb(0xfde68a))
                                 .text_size(px(11.0))
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    if !busy_row {
-                                        this.run_op(AiOp::UpgradeTool(pkg_upgrade.clone()), cx);
+                                    if !disabled {
+                                        this.run_tool_action(ToolAction::Upgrade(pkg_upgrade.clone()), cx);
                                     }
                                 }))
                                 .child("升级"),
@@ -450,11 +574,17 @@ impl AiEnvironmentView {
                                     .text_color(if installed { theme.text } else { rgb(0xffffff) })
                                     .text_size(px(11.0))
                                     .on_click(cx.listener(move |this, _, _, cx| {
-                                        if !busy_row {
+                                        if !disabled {
                                             if installed {
-                                                this.run_op(AiOp::UninstallTool(pkg_op.clone()), cx);
+                                                this.run_tool_action(
+                                                    ToolAction::Uninstall(pkg_uninstall.clone()),
+                                                    cx,
+                                                );
                                             } else {
-                                                this.run_op(AiOp::InstallTool(pkg_op.clone()), cx);
+                                                this.run_tool_action(
+                                                    ToolAction::Install(pkg_install.clone()),
+                                                    cx,
+                                                );
                                             }
                                         }
                                     }))
@@ -468,24 +598,47 @@ impl AiEnvironmentView {
         &self,
         theme: &Theme,
         mcps: &[McpServerInfo],
-        busy: bool,
+        action_busy: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let loading = self.mcps_loading;
         crate::ui::table_container(theme)
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
                     .px_5()
                     .py_3()
-                    .text_size(px(14.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child("MCP 服务器"),
+                    .child(
+                        div()
+                            .text_size(px(14.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child("MCP 服务器"),
+                    )
+                    .child(
+                        div()
+                            .id("mcp-refresh")
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .bg(theme.panel_hover)
+                            .hover(|s| s.bg(theme.border))
+                            .text_color(theme.text)
+                            .text_size(px(11.5))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.start_detect(DetectKind::Mcp, cx);
+                            }))
+                            .child(if loading { "检测中…" } else { "刷新" }),
+                    ),
             )
             .children(mcps.iter().map(|m| {
                 let pkg_uninstall = m.package.clone();
                 let pkg_install = m.package.clone();
                 let installed = m.installed;
-                let busy_row = busy;
+                let disabled = action_busy;
                 div()
                     .id(SharedString::from(format!("ai-mcp-{}", m.name)))
                     .flex()
@@ -527,8 +680,8 @@ impl AiEnvironmentView {
                                 .text_color(theme.text)
                                 .text_size(px(11.0))
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    if !busy_row {
-                                        this.run_op(AiOp::UninstallMcp(pkg_uninstall.clone()), cx);
+                                    if !disabled {
+                                        this.run_mcp_action(McpAction::Uninstall(pkg_uninstall.clone()), cx);
                                     }
                                 }))
                                 .child("卸载"),
@@ -547,16 +700,19 @@ impl AiEnvironmentView {
                                 .text_color(rgb(0xffffff))
                                 .text_size(px(11.0))
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    if !busy_row {
-                                        this.run_op(AiOp::InstallMcp(pkg_install.clone()), cx);
+                                    if !disabled {
+                                        this.run_mcp_action(McpAction::Install(pkg_install.clone()), cx);
                                     }
                                 }))
                                 .child("安装"),
                         )
                     })
             }))
-            .when(mcps.is_empty(), |s| {
-                s.child(crate::ui::table_empty(theme, if busy { "检测中…" } else { "暂无 MCP 数据" }))
+            .when(mcps.is_empty() && !loading, |s| {
+                s.child(crate::ui::table_empty(theme, "暂无 MCP 数据 — 点击「刷新」"))
+            })
+            .when(mcps.is_empty() && loading, |s| {
+                s.child(crate::ui::table_empty(theme, "检测中…"))
             })
     }
 
@@ -564,9 +720,9 @@ impl AiEnvironmentView {
         &self,
         theme: &Theme,
         extensions: &[AiExtension],
-        busy: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let loading = self.ext_loading;
         crate::ui::table_container(theme)
             .child(
                 div()
@@ -593,16 +749,17 @@ impl AiEnvironmentView {
                             .hover(|s| s.bg(theme.border))
                             .text_color(theme.text)
                             .text_size(px(11.5))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if !busy {
-                                    this.run_op(AiOp::CheckExt, cx);
-                                }
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.start_detect(DetectKind::Ext, cx);
                             }))
-                            .child("刷新"),
+                            .child(if loading { "扫描中…" } else { "刷新" }),
                     ),
             )
-            .when(extensions.is_empty(), |s| {
-                s.child(crate::ui::table_empty(theme, if busy { "扫描中…" } else { "未发现扩展（扫描用户目录）" }))
+            .when(extensions.is_empty() && !loading, |s| {
+                s.child(crate::ui::table_empty(theme, "未发现扩展（点击「刷新」扫描用户目录）"))
+            })
+            .when(extensions.is_empty() && loading, |s| {
+                s.child(crate::ui::table_empty(theme, "扫描中…"))
             })
             .children(extensions.iter().take(12).map(|e| {
                 let tool = e.tool.clone();
