@@ -1,8 +1,11 @@
 // secm-app::pages::settings — 系统设置页
 // 开关组（HAGS/游戏模式/窗口化优化/VRR/鼠标精准度）+ 电源计划列表 + 异类调度策略 + 卓越性能导入。
-// 状态从 secm-core::settings 读取，操作后回读刷新。
+//
+// 并发模型：初始状态（开关/电源计划/异类策略）后台线程一次加载；所有写操作
+// （切换/激活计划/异类策略/导入卓越）在后台线程执行，完成后后台重读回填；
+// 主线程仅渲染当前状态。写操作互斥防并发。
 
-use gpui::{div, px, rgb, SharedString, Window, Context, Render};
+use gpui::{div, px, rgb, SharedString, Window, Context, Render, WeakEntity};
 use gpui::prelude::*;
 use secm_core::settings::{self, HeteroPolicies, PowerPlan, SettingState};
 
@@ -29,7 +32,7 @@ impl ToggleKind {
         }
     }
 
-    /// 开关开启方向（鼠标精准度开启 = 启用增强精确度；其余为"优化开启"）
+    /// 读取当前状态（后台线程调用）
     fn get(self) -> SettingState {
         match self {
             Self::Hags => settings::get_hags_state(),
@@ -61,6 +64,13 @@ const HETERO_CHOICES: &[(u32, &str)] = &[
     (5, "自动"),
 ];
 
+/// 全部设置状态（后台一次加载）
+struct AllSettings {
+    toggles: Vec<(ToggleKind, SettingState)>,
+    plans: Vec<PowerPlan>,
+    hetero: Option<HeteroPolicies>,
+}
+
 pub struct SettingsView {
     /// 开关状态列表
     toggles: Vec<(ToggleKind, SettingState)>,
@@ -68,6 +78,10 @@ pub struct SettingsView {
     plans: Vec<PowerPlan>,
     /// 异类调度策略（无/不支持时 None）
     hetero: Option<HeteroPolicies>,
+    /// 初始状态是否加载中
+    loading: bool,
+    /// 写操作进行中（互斥，防并发写注册表）
+    op_busy: bool,
     /// 状态消息（操作反馈）
     status: SharedString,
     /// 卓越性能导入反馈
@@ -77,79 +91,253 @@ pub struct SettingsView {
 impl SettingsView {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let mut v = Self {
-            toggles: Self::load_toggles(),
-            plans: settings::get_power_plans().unwrap_or_default(),
-            hetero: settings::get_hetero_policies().ok(),
-            status: SharedString::from(""),
+            toggles: Vec::new(),
+            plans: Vec::new(),
+            hetero: None,
+            loading: false,
+            op_busy: false,
+            status: SharedString::from("正在读取设置状态…"),
             ultimate_msg: SharedString::from(""),
         };
-        v.refresh(cx);
+        v.start_load(cx);
         v
     }
 
-    fn load_toggles() -> Vec<(ToggleKind, SettingState)> {
-        [
-            ToggleKind::Hags,
-            ToggleKind::GameMode,
-            ToggleKind::GameOptimization,
-            ToggleKind::Vrr,
-            ToggleKind::MousePrecision,
-        ]
-        .into_iter()
-        .map(|k| (k, k.get()))
-        .collect()
-    }
-
-    fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.toggles = Self::load_toggles();
-        self.plans = settings::get_power_plans().unwrap_or_default();
-        self.hetero = settings::get_hetero_policies().ok();
+    /// 后台加载全部状态（开关/电源计划/异类策略）
+    fn start_load(&mut self, cx: &mut Context<Self>) {
+        if self.loading {
+            return;
+        }
+        self.loading = true;
         cx.notify();
+
+        let weak: WeakEntity<Self> = cx.entity().downgrade();
+        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+            let exec = cx.background_executor().clone();
+            let data = exec
+                .spawn(async move {
+                    AllSettings {
+                        toggles: [
+                            ToggleKind::Hags,
+                            ToggleKind::GameMode,
+                            ToggleKind::GameOptimization,
+                            ToggleKind::Vrr,
+                            ToggleKind::MousePrecision,
+                        ]
+                        .into_iter()
+                        .map(|k| (k, k.get()))
+                        .collect(),
+                        plans: settings::get_power_plans().unwrap_or_default(),
+                        hetero: settings::get_hetero_policies().ok(),
+                    }
+                })
+                .await;
+            if let Some(view) = weak.upgrade() {
+                view.update(cx, |this, cx| {
+                    this.loading = false;
+                    this.toggles = data.toggles;
+                    this.plans = data.plans;
+                    this.hetero = data.hetero;
+                    this.status = SharedString::from("");
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
-    /// 切换开关（读当前状态 → 反相 → set → 回读）
+    /// 切换开关（后台写 + 后台重读该开关真值）
     fn toggle(&mut self, kind: ToggleKind, cx: &mut Context<Self>) {
-        let cur = kind.get();
-        match kind.set(!cur.enabled) {
-            Ok(s) => self.status = SharedString::from(s.message.clone()),
-            Err(e) => self.status = SharedString::from(format!("操作失败: {}", e)),
+        if self.op_busy {
+            return;
         }
-        self.refresh(cx);
+        self.op_busy = true;
+        // 乐观 UI：立即反相显示当前开关
+        if let Some((_, st)) = self.toggles.iter_mut().find(|(k, _)| *k == kind) {
+            st.enabled = !st.enabled;
+        }
+        cx.notify();
+
+        let weak: WeakEntity<Self> = cx.entity().downgrade();
+        let kind_c = kind;
+        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+            let exec = cx.background_executor().clone();
+            // 后台：读当前真值 → 反相写入
+            let result = exec
+                .spawn(async move {
+                    let cur = kind_c.get();
+                    kind_c.set(!cur.enabled)
+                })
+                .await;
+            if let Some(view) = weak.upgrade() {
+                view.update(cx, |this, cx| {
+                    this.op_busy = false;
+                    match &result {
+                        Ok(s) => this.status = SharedString::from(s.message.clone()),
+                        Err(e) => this.status = SharedString::from(format!("操作失败: {}", e)),
+                    }
+                    cx.notify();
+                })
+                .ok();
+                // 后台重读该开关，回填真实状态（写可能被系统拒绝）
+                let exec = cx.background_executor().clone();
+                let k2 = kind_c;
+                let new_state = exec.spawn(async move { k2.get() }).await;
+                if let Some(view) = weak.upgrade() {
+                    view.update(cx, |this, cx| {
+                        if let Some((_, st)) = this.toggles.iter_mut().find(|(tk, _)| *tk == k2) {
+                            *st = new_state;
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            }
+        })
+        .detach();
     }
 
-    /// 切换电源计划
+    /// 切换电源计划（后台执行）
     fn activate_plan(&mut self, guid: &str, cx: &mut Context<Self>) {
-        match settings::set_power_plan(guid) {
-            Ok(()) => self.status = SharedString::from("电源计划已切换"),
-            Err(e) => self.status = SharedString::from(format!("切换失败: {}", e)),
+        if self.op_busy {
+            return;
         }
-        self.refresh(cx);
+        self.op_busy = true;
+        self.status = SharedString::from("正在切换电源计划…");
+        cx.notify();
+
+        let weak: WeakEntity<Self> = cx.entity().downgrade();
+        let guid_c = guid.to_string();
+        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+            let exec = cx.background_executor().clone();
+            let result = exec
+                .spawn(async move { settings::set_power_plan(&guid_c) })
+                .await;
+            if let Some(view) = weak.upgrade() {
+                view.update(cx, |this, cx| {
+                    this.op_busy = false;
+                    this.status = match result {
+                        Ok(()) => SharedString::from("电源计划已切换"),
+                        Err(e) => SharedString::from(format!("切换失败: {}", e)),
+                    };
+                    cx.notify();
+                })
+                .ok();
+                view.update(cx, |this, cx| {
+                    // 后台重读计划列表与当前激活
+                    let _ = cx;
+                    this.start_reload_plans(cx);
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
-    /// 设置异类调度策略（kind=thread/short；AC/DC 同步写）
+    /// 后台仅重读电源计划列表
+    fn start_reload_plans(&mut self, cx: &mut Context<Self>) {
+        let weak: WeakEntity<Self> = cx.entity().downgrade();
+        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+            let exec = cx.background_executor().clone();
+            let plans = exec
+                .spawn(async move { settings::get_power_plans().unwrap_or_default() })
+                .await;
+            if let Some(view) = weak.upgrade() {
+                view.update(cx, |this, cx| {
+                    this.plans = plans;
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// 设置异类调度策略（后台 AC/DC 写 + 重读）
     fn set_hetero(&mut self, kind: &str, value: u32, cx: &mut Context<Self>) {
+        if self.op_busy {
+            return;
+        }
+        self.op_busy = true;
+        self.status = SharedString::from("正在设置调度策略…");
+        cx.notify();
+
         let kind_label = if kind == "short" {
             "短运行线程调度策略"
         } else {
             "线程调度策略"
         };
-        match settings::set_hetero_policy(kind, value) {
-            Ok(()) => self.status = SharedString::from(format!("{}已设为「{}」", kind_label, Self::hetero_label(value))),
-            Err(e) => self.status = SharedString::from(format!("设置失败: {}", e)),
-        }
-        self.refresh(cx);
+        let weak: WeakEntity<Self> = cx.entity().downgrade();
+        let kind_c = kind.to_string();
+        let kind_label_c = kind_label.to_string();
+        let value_c = value;
+        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+            let exec = cx.background_executor().clone();
+            let result = exec
+                .spawn(async move { settings::set_hetero_policy(&kind_c, value_c) })
+                .await;
+            if let Some(view) = weak.upgrade() {
+                view.update(cx, |this, cx| {
+                    this.op_busy = false;
+                    this.status = match result {
+                        Ok(()) => SharedString::from(format!(
+                            "{}已设为「{}」",
+                            kind_label_c,
+                            Self::hetero_label(value_c)
+                        )),
+                        Err(e) => SharedString::from(format!("设置失败: {}", e)),
+                    };
+                    cx.notify();
+                })
+                .ok();
+                view.update(cx, |this, cx| {
+                    let _ = cx;
+                    this.start_load(cx);
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
-    /// 导入并激活卓越性能电源计划
+    /// 导入并激活卓越性能电源计划（后台执行）
     fn import_ultimate(&mut self, cx: &mut Context<Self>) {
-        match settings::enable_ultimate_performance() {
-            Ok(msg) => {
-                self.ultimate_msg = SharedString::from(msg);
-                self.status = SharedString::from("卓越性能电源计划已导入并激活");
-            }
-            Err(e) => self.status = SharedString::from(format!("导入失败: {}", e)),
+        if self.op_busy {
+            return;
         }
-        self.refresh(cx);
+        self.op_busy = true;
+        self.status = SharedString::from("正在导入卓越性能计划…");
+        cx.notify();
+
+        let weak: WeakEntity<Self> = cx.entity().downgrade();
+        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+            let exec = cx.background_executor().clone();
+            let result = exec
+                .spawn(async move { settings::enable_ultimate_performance() })
+                .await;
+            if let Some(view) = weak.upgrade() {
+                view.update(cx, |this, cx| {
+                    this.op_busy = false;
+                    match result {
+                        Ok(msg) => {
+                            this.ultimate_msg = SharedString::from(msg);
+                            this.status = SharedString::from("卓越性能电源计划已导入并激活");
+                        }
+                        Err(e) => {
+                            this.status = SharedString::from(format!("导入失败: {}", e));
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+                view.update(cx, |this, cx| {
+                    this.start_reload_plans(cx);
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     fn hetero_label(value: u32) -> &'static str {

@@ -102,10 +102,6 @@ impl AiEnvironmentView {
         }
     }
 
-    fn any_loading(&self) -> bool {
-        self.npm_loading || self.tools_loading || self.mcps_loading || self.ext_loading
-    }
-
     /// 启动一组检测（已有同组在跑则忽略；每组独立，可并发四组）
     fn start_detect(&mut self, kind: DetectKind, cx: &mut Context<Self>) {
         if self.loading_of(kind) {

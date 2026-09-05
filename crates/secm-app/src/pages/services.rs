@@ -1,7 +1,10 @@
 // secm-app::pages::services — 服务管理页
-// 枚举 Windows 服务 + 搜索 + 启停/启动类型（需管理员操作走 core 权限门禁）。
+// 枚举 Windows 服务 + 搜索 + 启停/启动类型。
+//
+// 并发模型：服务枚举（数百服务，慢）后台线程执行；启停/启动类型为系统 API
+// 调用，后台执行 + 完成后延迟后台刷新状态。主线程仅渲染。
 
-use gpui::{div, px, rgb, SharedString, Window, Context, Render};
+use gpui::{div, px, rgb, SharedString, Window, Context, Render, WeakEntity};
 use gpui::prelude::*;
 use secm_core::settings::{self, ServiceInfo};
 
@@ -12,22 +15,70 @@ pub struct ServicesView {
     /// 搜索关键词（匹配 name/display_name）
     keyword: SharedString,
     status: SharedString,
+    /// 列表加载中
+    loading: bool,
+    /// 操作进行中（互斥）
+    op_busy: bool,
 }
 
 impl ServicesView {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let mut v = Self {
-            services: settings::list_all_services().unwrap_or_default(),
+            services: Vec::new(),
             keyword: SharedString::from(""),
-            status: SharedString::from(""),
+            status: SharedString::from("正在加载服务列表…"),
+            loading: false,
+            op_busy: false,
         };
-        v.refresh(cx);
+        v.start_load(cx);
         v
     }
 
-    fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.services = settings::list_all_services().unwrap_or_default();
+    /// 后台枚举服务（数百项，慢；结果回填 UI）
+    fn start_load(&mut self, cx: &mut Context<Self>) {
+        if self.loading {
+            return;
+        }
+        self.loading = true;
         cx.notify();
+
+        let weak: WeakEntity<Self> = cx.entity().downgrade();
+        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+            let exec = cx.background_executor().clone();
+            let services = exec
+                .spawn(async move { settings::list_all_services().unwrap_or_default() })
+                .await;
+            if let Some(view) = weak.upgrade() {
+                view.update(cx, |this, cx| {
+                    this.loading = false;
+                    this.services = services;
+                    this.status = SharedString::from("");
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// 延迟 800ms 后台刷新（启停/启动类型异步生效）
+    fn reload_later(&mut self, cx: &mut Context<Self>) {
+        let weak: WeakEntity<Self> = cx.entity().downgrade();
+        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+            gpui::Timer::after(std::time::Duration::from_millis(800)).await;
+            let exec = cx.background_executor().clone();
+            let services = exec
+                .spawn(async move { settings::list_all_services().unwrap_or_default() })
+                .await;
+            if let Some(view) = weak.upgrade() {
+                view.update(cx, |this, cx| {
+                    this.services = services;
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     fn filtered(&self) -> Vec<&ServiceInfo> {
@@ -51,25 +102,60 @@ impl ServicesView {
         cx.notify();
     }
 
+    /// 启停/启动类型（后台系统 API + 延迟刷新）
     fn op_service(
         &mut self,
         name: &str,
         op: ServiceOp,
         cx: &mut Context<Self>,
     ) {
-        let result = match op {
-            ServiceOp::Start => settings::start_service(name),
-            ServiceOp::Stop => settings::stop_service(name),
-            ServiceOp::ToggleAuto => settings::set_service_start_type(name, "auto"),
-            ServiceOp::ToggleManual => settings::set_service_start_type(name, "manual"),
-            ServiceOp::ToggleDisable => settings::set_service_start_type(name, "disabled"),
-        };
-        self.status = match result {
-            Ok(msg) => SharedString::from(msg),
-            Err(e) => SharedString::from(e),
-        };
-        // 操作后刷新状态（启动/停止可能异步，稍后重查）
-        self.refresh(cx);
+        if self.op_busy {
+            return;
+        }
+        self.op_busy = true;
+        self.status = SharedString::from(format!("正在{} {}…", op.label(), name));
+        cx.notify();
+
+        let weak: WeakEntity<Self> = cx.entity().downgrade();
+        let name_c = name.to_string();
+        let op_c = op;
+        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+            let exec = cx.background_executor().clone();
+            let result = exec
+                .spawn(async move {
+                    match op_c {
+                        ServiceOp::Start => settings::start_service(&name_c),
+                        ServiceOp::Stop => settings::stop_service(&name_c),
+                        ServiceOp::ToggleAuto => {
+                            settings::set_service_start_type(&name_c, "auto")
+                        }
+                        ServiceOp::ToggleManual => {
+                            settings::set_service_start_type(&name_c, "manual")
+                        }
+                        ServiceOp::ToggleDisable => {
+                            settings::set_service_start_type(&name_c, "disabled")
+                        }
+                    }
+                })
+                .await;
+            if let Some(view) = weak.upgrade() {
+                view.update(cx, |this, cx| {
+                    this.op_busy = false;
+                    this.status = match result {
+                        Ok(msg) => SharedString::from(msg),
+                        Err(e) => SharedString::from(e),
+                    };
+                    cx.notify();
+                })
+                .ok();
+                view.update(cx, |this, cx| {
+                    // 延迟后台刷新（服务状态异步变化）
+                    this.reload_later(cx);
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     fn status_color(status: &str, theme: &Theme) -> gpui::Rgba {
@@ -82,13 +168,25 @@ impl ServicesView {
 }
 
 #[derive(Clone, Copy)]
-#[allow(dead_code)] // 启动类型切换按钮待接入（TextInput 后）
+#[allow(dead_code)] // 启动类型切换按钮待接入 UI
 enum ServiceOp {
     Start,
     Stop,
     ToggleAuto,
     ToggleManual,
     ToggleDisable,
+}
+
+impl ServiceOp {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Start => "启动",
+            Self::Stop => "停止",
+            Self::ToggleAuto => "设为自动",
+            Self::ToggleManual => "设为手动",
+            Self::ToggleDisable => "禁用",
+        }
+    }
 }
 
 impl Render for ServicesView {

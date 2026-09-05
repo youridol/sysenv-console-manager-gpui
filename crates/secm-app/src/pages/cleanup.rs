@@ -54,6 +54,8 @@ pub struct CleanupView {
     status: SharedString,
     /// 清理是否执行中（防并发点击）
     cleaning: bool,
+    /// 进程列表加载中
+    loading_procs: bool,
     /// 搜索关键词
     keyword: SharedString,
 }
@@ -61,29 +63,59 @@ pub struct CleanupView {
 impl CleanupView {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let mut v = Self {
-            procs: cleanup::list_processes(),
+            procs: Vec::new(),
             last_result: None,
-            status: SharedString::from(""),
+            status: SharedString::from("正在加载进程列表…"),
             cleaning: false,
+            loading_procs: false,
             keyword: SharedString::from(""),
         };
         v.refresh_procs(cx);
         v
     }
 
+    /// 后台枚举进程（Top 200，快照耗时；结果回填）
     fn refresh_procs(&mut self, cx: &mut Context<Self>) {
-        self.procs = cleanup::list_processes();
+        if self.loading_procs {
+            return;
+        }
+        self.loading_procs = true;
         cx.notify();
+
+        let weak: WeakEntity<Self> = cx.entity().downgrade();
+        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+            let exec = cx.background_executor().clone();
+            let procs = exec
+                .spawn(async move { cleanup::list_processes() })
+                .await;
+            if let Some(view) = weak.upgrade() {
+                view.update(cx, |this, cx| {
+                    this.loading_procs = false;
+                    this.procs = procs;
+                    this.status = SharedString::from("");
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
+    /// DNS 刷新（系统 API，后台执行）
     fn flush_dns(&mut self, cx: &mut Context<Self>) {
-        let r = cleanup::flush_dns();
-        self.status = SharedString::from(if r.success {
-            r.message.clone()
-        } else {
-            r.message.clone()
-        });
-        cx.notify();
+        let weak: WeakEntity<Self> = cx.entity().downgrade();
+        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+            let exec = cx.background_executor().clone();
+            let r = exec.spawn(async move { cleanup::flush_dns() }).await;
+            if let Some(view) = weak.upgrade() {
+                view.update(cx, |this, cx| {
+                    this.status = SharedString::from(r.message.clone());
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     /// 后台执行清理（文件 IO 可能耗时数秒）
@@ -112,14 +144,24 @@ impl CleanupView {
         .detach();
     }
 
+    /// 设置进程优先级（系统 API，后台执行）
     fn set_prio(&mut self, pid: u32, prio: &str, cx: &mut Context<Self>) {
-        let r = cleanup::set_process_priority(pid, prio);
-        self.status = SharedString::from(if r.success {
-            r.message.clone()
-        } else {
-            r.message.clone()
-        });
-        cx.notify();
+        let weak: WeakEntity<Self> = cx.entity().downgrade();
+        let prio_c = prio.to_string();
+        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+            let exec = cx.background_executor().clone();
+            let r = exec
+                .spawn(async move { cleanup::set_process_priority(pid, &prio_c) })
+                .await;
+            if let Some(view) = weak.upgrade() {
+                view.update(cx, |this, cx| {
+                    this.status = SharedString::from(r.message.clone());
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     fn filtered(&self) -> Vec<&ProcessInfo> {
