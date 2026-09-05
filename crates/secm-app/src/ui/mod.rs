@@ -1,6 +1,8 @@
 // secm-app::ui — 主题化基础控件（对齐源 shadcn 视觉：Card/Button/Badge/SectionTitle）
 // 全部基于 GPUI 原语，颜色取自定义 Theme。
 
+pub mod text_input;
+
 use crate::theme::Theme;
 use gpui::{
     div, px, rgb, Rgba, SharedString,

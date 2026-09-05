@@ -5329,6 +5329,7 @@ dependencies = [
  "muda",
  "secm-core",
  "tray-icon",
+ "unicode-segmentation",
  "windows-sys 0.59.0",
 ]
 
@@ -5337,6 +5338,7 @@ name = "secm-core"
 version = "2.0.0"
 dependencies = [
  "chrono",
+ "encoding_rs",
  "log",
  "parking_lot",
  "secm-datasource",
