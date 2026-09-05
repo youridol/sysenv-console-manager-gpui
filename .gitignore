@@ -2,6 +2,13 @@
 /target
 **/*.rs.bk
 
+# .NET sidecar 构建产物（源码入库，bin/obj 不入）
+sidecar-lhm/bin/
+sidecar-lhm/obj/
+
+# 发布目录（scripts/publish.ps1 生成）
+/dist
+
 # 本地数据（运行时生成，不入库）
 *.log
 appdata/
