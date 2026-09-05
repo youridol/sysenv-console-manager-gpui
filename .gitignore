@@ -16,5 +16,4 @@ Thumbs.db
 Desktop.ini
 .DS_Store
 
-# 冒烟测试输出
-net-smoke.*
+# 冒烟测试输出`n*-smoke.*
