@@ -27,14 +27,17 @@ sysenv-console-manager-gpui/
 │   ├── secm-datasource/   # 纯 Rust 采集层（注册表/服务/电源/网络/DNS/磁盘…）
 │   ├── secm-core/         # 业务逻辑（采集编排/系统操作，无 UI 依赖）
 │   └── secm-app/          # GPUI 桌面应用（UI + 装配 + main）
+├── sidecar-lhm/           # LHM 温度 sidecar（.NET 8 源码 + MPL-2.0/LGPL 许可）
+├── third_party/           # 第三方驱动（WinRing0/PawnIO）源码与许可
+├── scripts/publish.ps1    # 一键发布（Rust + sidecar + 许可 → dist/）
 ├── docs/adr/              # 架构决策记录（重构全案）
 ├── docs/spec/             # 功能基准（验收依据）
 └── LICENSE                # MIT
 ```
 
-> LHM 温度 sidecar（.NET，MPL-2.0）与第三方驱动（third_party/）沿用原 Tauri 仓库
-> https://github.com/youridol/sysenv-console-manager 的资产；运行时优先加载 exe 同目录
-> `lhm/publish/LhmSidecar.exe`（也可用环境变量 `SECM_LHM_SIDECAR` 指定目录）。
+> LHM 温度 sidecar 以进程隔离方式运行（MPL-2.0 边界）；发布时由 scripts/publish.ps1
+> dotnet publish 出 `lhm/publish/LhmSidecar.exe`，主程序自动从 exe 同目录定位
+> （也可用环境变量 `SECM_LHM_SIDECAR` 指定目录）。第三方驱动见 third_party/ 内 README。
 
 ## 页面
 
