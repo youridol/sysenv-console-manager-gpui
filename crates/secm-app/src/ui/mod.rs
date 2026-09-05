@@ -91,7 +91,7 @@ pub fn badge(_theme: &Theme, text: &str, border_color: Rgba) -> impl IntoElement
 }
 
 // ---------------------------------------------------------------------------
-// SectionTitle / PageHeader
+// PageHeader / SectionTitle
 // ---------------------------------------------------------------------------
 
 /// 区块标题
@@ -132,3 +132,53 @@ pub fn page_header(
                 .child(subtitle.into()),
         )
 }
+
+// ---------------------------------------------------------------------------
+// 简易数据表辅助（服务/进程等列表通用：表头 + 行，列宽按比例 flex）
+// ---------------------------------------------------------------------------
+
+/// 表容器（圆角卡片内嵌表）
+pub fn table_container(theme: &Theme) -> gpui::Div {
+    div()
+        .flex_col()
+        .rounded_md()
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.panel)
+}
+
+/// 表头行
+pub fn table_head(theme: &Theme, cols: &[&str]) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_4()
+        .py_2()
+        .bg(theme.panel_hover)
+        .children(cols.iter().map(|c| {
+            div()
+                .flex_1()
+                .text_size(px(11.5))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.text_muted)
+                .child(c.to_string())
+        }))
+}
+
+/// 空表提示
+pub fn table_empty(theme: &Theme, msg: &str) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .px_4()
+        .py_8()
+        .child(
+            div()
+                .text_size(px(12.5))
+                .text_color(theme.text_muted)
+                .child(msg.to_string()),
+        )
+}
+
