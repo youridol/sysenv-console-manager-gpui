@@ -5,6 +5,7 @@
 pub mod cleanup;
 pub mod environment;
 pub mod error;
+pub mod game_env;
 pub mod hardware;
 pub mod lhm;
 pub mod logger;

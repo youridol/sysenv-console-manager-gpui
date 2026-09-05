@@ -12,7 +12,6 @@ pub struct Theme {
     pub text: Rgba,
     pub text_muted: Rgba,
     pub brand: Rgba,
-    pub brand_purple: Rgba,
     pub success: Rgba,
     pub warn: Rgba,
     pub danger: Rgba,
@@ -28,11 +27,6 @@ fn rgba(hex: u32) -> Rgba {
     }
 }
 
-/// 从 hex 构造 Rgba（公开，UI 层与 theme 共用）
-pub fn from_hex(hex: u32) -> Rgba {
-    rgba(hex)
-}
-
 impl Theme {
     /// 深色主题（默认；对齐源深色视觉：zinc-950 背景 + 品牌蓝/紫渐变）
     pub fn dark() -> Self {
@@ -44,7 +38,6 @@ impl Theme {
             text: rgba(0xe8eaf2),
             text_muted: rgba(0x9aa2b5),
             brand: rgba(0x4f7cff),         // brand-blue
-            brand_purple: rgba(0x9b6bff),  // brand-purple
             success: rgba(0x4ade80),
             warn: rgba(0xfbbf24),
             danger: rgba(0xf87171),

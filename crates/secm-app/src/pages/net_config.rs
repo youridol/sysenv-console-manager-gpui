@@ -97,6 +97,24 @@ impl NetConfigView {
             .and_then(|name| self.adapters.iter().find(|a| &a.name == name))
     }
 
+    /// 选中适配器并预填 MAC 输入框
+    fn select_adapter(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.selected = Some(name.to_string());
+        self.steps.clear();
+        self.status.clear();
+        // 预填 MAC 输入框为当前地址（便于直接修改）
+        if let Some(a) = self.adapters.iter().find(|a| a.name == name) {
+            if let Some(mac) = &a.mac {
+                let mac = mac.clone();
+                let mac_input = self.mac_input.clone();
+                mac_input.update(cx, |f, cx| {
+                    f.set_value(mac, cx);
+                });
+            }
+        }
+        cx.notify();
+    }
+
     fn apply_result(&mut self, r: net_config::NetworkConfigApplyResult, cx: &mut Context<Self>) {
         self.steps = r.steps;
         self.status = if r.all_ok {
@@ -438,10 +456,7 @@ impl NetConfigView {
                                 .border_b_1()
                                 .border_color(theme.border)
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.selected = Some(name_click.clone());
-                                    this.steps.clear();
-                                    this.status.clear();
-                                    cx.notify();
+                                    this.select_adapter(&name_click, cx);
                                 }))
                                 .child(
                                     div()

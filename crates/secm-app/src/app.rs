@@ -2,13 +2,15 @@
 // ADR-0003：单窗口 + Page 枚举导航；控件走 theme。
 
 use gpui::{
-    div, px, Context, Entity, Render, SharedString, Window,
+    div, px, Context, Entity, Render, Window,
 };
 use gpui::prelude::*;
 
 use crate::pages::about::AboutView;
+use crate::pages::ai_environment::AiEnvironmentView;
 use crate::pages::cleanup::CleanupView;
 use crate::pages::dashboard::DashboardView;
+use crate::pages::environment::EnvironmentView;
 use crate::pages::hardware::HardwareView;
 use crate::pages::logs::LogsView;
 use crate::pages::net_config::NetConfigView;
@@ -77,6 +79,8 @@ pub struct AppRoot {
     network: Entity<NetworkView>,
     net_config: Entity<NetConfigView>,
     hardware: Entity<HardwareView>,
+    environment: Entity<EnvironmentView>,
+    ai_environment: Entity<AiEnvironmentView>,
     about: Entity<AboutView>,
 }
 
@@ -91,6 +95,8 @@ impl AppRoot {
         let network = cx.new(|cx| NetworkView::new(cx));
         let net_config = cx.new(|cx| NetConfigView::new(cx));
         let hardware = cx.new(|cx| HardwareView::new(cx));
+        let environment = cx.new(|cx| EnvironmentView::new(cx));
+        let ai_environment = cx.new(|cx| AiEnvironmentView::new(cx));
         let about = cx.new(|_| AboutView::new());
         Self {
             theme,
@@ -103,6 +109,8 @@ impl AppRoot {
             network,
             net_config,
             hardware,
+            environment,
+            ai_environment,
             about,
         }
     }
@@ -207,25 +215,9 @@ impl AppRoot {
             Page::Network => self.network.clone().into_any_element(),
             Page::NetConfig => self.net_config.clone().into_any_element(),
             Page::Hardware => self.hardware.clone().into_any_element(),
+            Page::Environment => self.environment.clone().into_any_element(),
+            Page::AiEnvironment => self.ai_environment.clone().into_any_element(),
             Page::About => self.about.clone().into_any_element(),
-            other => {
-                let theme = self.theme;
-                div()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        div()
-                            .text_color(theme.text_muted)
-                            .text_size(px(14.0))
-                            .child(SharedString::from(format!(
-                                "「{}」页面 — 后续 Phase 实现",
-                                other.label()
-                            ))),
-                    )
-                    .into_any_element()
-            }
         }
     }
 }
