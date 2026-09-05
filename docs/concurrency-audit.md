@@ -101,3 +101,24 @@
 - 建议优先级：**F8/F9/F10（秒级冻结）→ F19 启动路径（F3–F6 一起搬后台）→ F11/F13/F14**。
 
 （本报告为只读审计产物，未改动任何源码。）
+
+---
+
+## 五、修复落实追踪（截至并发优化完成）
+
+> 审计后所有 A/B 类阻塞点均已后台化（提交 7a2375a / e0efcf8 / 后续 net_config+hardware 提交）。
+
+| # | 状态 | 修复提交/方式 |
+|---|------|--------------|
+| F1/F2 | ✅ 已修复 | 7a2375a：Environment/AiEnvironment 构造与检测全 cx.spawn + background_executor + WeakEntity 回填 |
+| F3/F12 | ✅ 已修复 | e0efcf8：Settings 初始状态后台整包加载；toggle/激活计划/异类策略/导入卓越后台写 + 后台重读，op_busy 互斥 + 开关乐观 UI |
+| F4/F11 | ✅ 已修复 | e0efcf8：Services 服务枚举后台加载；启停/启动类型后台执行 + 800ms 延迟后台刷新 |
+| F5/F14/F15 | ✅ 已修复 | e0efcf8：Cleanup 进程枚举后台加载；DNS 刷新/优先级设置后台执行 |
+| F6/F13 | ✅ 已修复 | 后续提交：Hardware 磁盘 IOCTL 枚举构造/刷新后台化，loading 态展示 |
+| F7 | ✅ 已修复 | 同上：NetConfig 适配器枚举后台加载 |
+| F8/F9/F10 | ✅ 已修复 | 同上：DHCP/静态 v4/静态 v6 三按钮 netsh 全部经 run_apply 后台执行（原 0.2-3.5s 主线程冻结），applying 互斥 + 延迟刷新 |
+| F19 | ✅ 已修复 | 上列构造后台化后，AppRoot::new 11 页全量构造路径无同步阻塞 IO |
+| F16/F17/F18 | ✅ 已核验 | 低危（µs 级锁+clone），保持不变；lhm/npm 初始化仅在后台线程的不变量成立 |
+| F20 | ✅ 已核验 | C 类 0 处（render 无阻塞 IO） |
+
+**收尾验证**：`cargo check --workspace` 零警告零错误；全量单测通过；debug/release 构建 + 启动冒烟确认窗口响应。
