@@ -4,6 +4,7 @@
 
 pub mod cleanup;
 pub mod error;
+pub mod hardware;
 pub mod lhm;
 pub mod logger;
 pub mod network;
