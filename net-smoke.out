@@ -1,0 +1,2 @@
+[LhmSidecar] starting port=45980 interval=1000ms elevated=True
+[LhmSidecar] HTTP listening on http://127.0.0.1:45980

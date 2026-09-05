@@ -3,5 +3,6 @@ pub mod about;
 pub mod cleanup;
 pub mod dashboard;
 pub mod logs;
+pub mod network;
 pub mod services;
 pub mod settings;

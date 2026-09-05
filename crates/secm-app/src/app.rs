@@ -10,6 +10,7 @@ use crate::pages::about::AboutView;
 use crate::pages::cleanup::CleanupView;
 use crate::pages::dashboard::DashboardView;
 use crate::pages::logs::LogsView;
+use crate::pages::network::NetworkView;
 use crate::pages::services::ServicesView;
 use crate::pages::settings::SettingsView;
 use crate::theme::Theme;
@@ -71,6 +72,7 @@ pub struct AppRoot {
     settings: Entity<SettingsView>,
     services: Entity<ServicesView>,
     cleanup: Entity<CleanupView>,
+    network: Entity<NetworkView>,
     about: Entity<AboutView>,
 }
 
@@ -82,6 +84,7 @@ impl AppRoot {
         let settings = cx.new(|cx| SettingsView::new(cx));
         let services = cx.new(|cx| ServicesView::new(cx));
         let cleanup = cx.new(|cx| CleanupView::new(cx));
+        let network = cx.new(|cx| NetworkView::new(cx));
         let about = cx.new(|_| AboutView::new());
         Self {
             theme,
@@ -91,6 +94,7 @@ impl AppRoot {
             settings,
             services,
             cleanup,
+            network,
             about,
         }
     }
@@ -192,6 +196,7 @@ impl AppRoot {
             Page::Settings => self.settings.clone().into_any_element(),
             Page::Services => self.services.clone().into_any_element(),
             Page::Cleanup => self.cleanup.clone().into_any_element(),
+            Page::Network => self.network.clone().into_any_element(),
             Page::About => self.about.clone().into_any_element(),
             other => {
                 let theme = self.theme;
