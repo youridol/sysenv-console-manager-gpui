@@ -2,6 +2,7 @@
 
 mod app;
 mod pages;
+mod single_instance;
 mod theme;
 mod tray;
 mod ui;
@@ -11,6 +12,11 @@ use gpui::{
 };
 
 fn main() {
+    // 单实例锁：已有实例运行时直接退出（防双开）
+    if !single_instance::acquire() {
+        std::process::exit(0);
+    }
+
     Application::new().run(|cx: &mut App| {
         // 文本输入控件按键绑定（TextField keymap 上下文）
         crate::ui::text_input::bind_text_field_keys(cx);
