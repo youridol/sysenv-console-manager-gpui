@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use windows_sys::Win32::System::Performance::{
     PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
-    PdhOpenQueryW, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE,
+    PdhOpenQueryW, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY,
 };
 
 /// PDH 成功状态码
@@ -60,7 +60,9 @@ fn to_utf16(s: &str) -> Vec<u16> {
 ///
 /// 计数器不存在（无物理磁盘/虚拟机）时返回 Err，调用方标记不可用。
 fn pdh_init() -> Result<PdhState, String> {
-    let mut query: isize = 0;
+    // 0.61 起 PDH 句柄为 *mut c_void；结构体存 isize（保证 Mutex 静态可用 Send），
+    // FFI 边界处相互转换
+    let mut query: PDH_HQUERY = std::ptr::null_mut();
     // SAFETY: NULL 数据源 = 本地实时性能数据；query 由 API 写入
     let rc = unsafe { PdhOpenQueryW(std::ptr::null(), 0, &mut query) };
     if rc != 0 {
@@ -68,8 +70,8 @@ fn pdh_init() -> Result<PdhState, String> {
     }
     let read_path = to_utf16(COUNTER_READ);
     let write_path = to_utf16(COUNTER_WRITE);
-    let mut read_counter: isize = 0;
-    let mut write_counter: isize = 0;
+    let mut read_counter: PDH_HCOUNTER = std::ptr::null_mut();
+    let mut write_counter: PDH_HCOUNTER = std::ptr::null_mut();
     // SAFETY: 计数器路径为 NUL 结尾 UTF-16；句柄由 API 写入
     let rc_read = unsafe { PdhAddEnglishCounterW(query, read_path.as_ptr(), 0, &mut read_counter) };
     let rc_write =
@@ -86,9 +88,9 @@ fn pdh_init() -> Result<PdhState, String> {
     // SAFETY: query 为有效句柄
     unsafe { PdhCollectQueryData(query) };
     Ok(PdhState {
-        query,
-        read_counter,
-        write_counter,
+        query: query as isize,
+        read_counter: read_counter as isize,
+        write_counter: write_counter as isize,
         speed_map: HashMap::new(),
         failed: false,
     })
@@ -108,7 +110,7 @@ fn read_counter_array_mbps(counter: isize) -> HashMap<String, f32> {
     // SAFETY: 首次调用仅查询大小（buffer 为 null）
     let rc = unsafe {
         PdhGetFormattedCounterArrayW(
-            counter,
+            counter as PDH_HCOUNTER,
             PDH_FMT_DOUBLE,
             &mut buf_size,
             &mut item_count,
@@ -134,7 +136,7 @@ fn read_counter_array_mbps(counter: isize) -> HashMap<String, f32> {
     // SAFETY: buf 为对齐正确的输出缓冲，容量 >= buf_size 字节
     let rc = unsafe {
         PdhGetFormattedCounterArrayW(
-            counter,
+            counter as PDH_HCOUNTER,
             PDH_FMT_DOUBLE,
             &mut out_size,
             &mut out_count,
@@ -192,7 +194,7 @@ pub fn get_disk_io_speed_map() -> HashMap<String, (f32, f32)> {
         // 后即可取最近 ~1s 平均速率（间隔不足时单项 CStatus=PDH_INVALID_DATA，
         // 该实例沿用上次值）
         // SAFETY: query 为有效句柄
-        unsafe { PdhCollectQueryData(s.query) };
+        unsafe { PdhCollectQueryData(s.query as PDH_HQUERY) };
         let reads = read_counter_array_mbps(s.read_counter);
         let writes = read_counter_array_mbps(s.write_counter);
         // 按实例名合并读/写

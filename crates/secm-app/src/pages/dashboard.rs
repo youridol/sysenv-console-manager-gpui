@@ -7,29 +7,40 @@ use gpui::{
 use gpui::prelude::*;
 use secm_core::sensor::SensorSnapshot;
 use secm_core::sensor_service::SensorService;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::theme::Theme;
 
 pub struct DashboardView {
     snap: SensorSnapshot,
+    /// 页面可见性门控（P1-12）：仅当前页激活时拉取快照并 notify，
+    /// 避免页面不可见时 1s 空转（AppRoot::navigate 控制）
+    active: Arc<AtomicBool>,
 }
 
 impl DashboardView {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(active: Arc<AtomicBool>, cx: &mut Context<Self>) -> Self {
         SensorService::start_once();
         let mut view = Self {
             snap: SensorService::snapshot(),
+            active,
         };
         view.schedule_refresh(cx);
         view
     }
 
     fn schedule_refresh(&mut self, cx: &mut Context<Self>) {
+        let active = self.active.clone();
         cx.spawn(
             async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
                 loop {
                     Timer::after(Duration::from_millis(1000)).await;
+                    // 不可见时仅睡眠轮询，不取快照不 notify（P1-12）
+                    if !active.load(Ordering::Relaxed) {
+                        continue;
+                    }
                     let snap = SensorService::snapshot();
                     if let Some(view) = this.upgrade() {
                         view.update(cx, |view, cx| {
@@ -55,7 +66,7 @@ impl DashboardView {
                         None,
                     ),
                     (
-                        rgb(0xf87171),
+                        theme.danger,
                         if g.temperature > 0.0 {
                             format!("温度 {:.0}°C", g.temperature)
                         } else {
@@ -64,7 +75,7 @@ impl DashboardView {
                         None,
                     ),
                     (
-                        rgb(0x38bdf8),
+                        theme.info,
                         if g.memory_total > 0 {
                             format!(
                                 "显存 {:.0} / {:.0} GB",
@@ -175,11 +186,11 @@ impl Render for DashboardView {
         let cpu_stats = vec![
             (theme.brand, format!("占用 {:.0}%", cpu.usage), None),
             (
-                rgb(0x38bdf8),
+                theme.info,
                 format!("频率 {:.2} GHz", cpu.clock_mhz / 1000.0),
                 Some(cpu.freq_source.clone()),
             ),
-            (rgb(0xf87171), format!("温度 {}", cpu_temp), cpu_badge),
+            (theme.danger, format!("温度 {}", cpu_temp), cpu_badge),
             (
                 theme.text_muted,
                 format!("{} 核", cpu.core_count),
@@ -199,7 +210,7 @@ impl Render for DashboardView {
                 Some(format!("{:.0}%", mem.usage_percent)),
             ),
             (
-                rgb(0x4ade80),
+                theme.success,
                 format!("可用 {:.1} GB", gb(mem.available)),
                 None,
             ),
@@ -212,11 +223,11 @@ impl Render for DashboardView {
                 format!("{:.0}%", d.usage_percent),
                 vec![
                     (
-                        rgb(0xfbbf24),
+                        theme.warn,
                         format!("{:.1} GB / {:.1} GB", gb(d.used_space), gb(d.total_space)),
                         Some(d.name.clone()),
                     ),
-                    (theme.text_muted, "S.M.A.R.T 后续阶段".to_string(), None),
+                    (theme.text_muted, "SMART 详情见「硬件检测」页".to_string(), None),
                 ],
             ),
             None => ("磁盘", "—".into(), Vec::new()),
@@ -256,7 +267,7 @@ impl Render for DashboardView {
                                 div()
                                     .text_size(px(12.0))
                                     .text_color(theme.text_muted)
-                                    .child("每秒刷新 · GPUI v2.0.0"),
+                                    .child(format!("每秒刷新 · GPUI v{}", env!("CARGO_PKG_VERSION"))),
                             ),
                     )
                     .child(
@@ -268,7 +279,7 @@ impl Render for DashboardView {
                                 div()
                                     .size(px(7.0))
                                     .rounded_full()
-                                    .bg(rgb(0x4ade80)),
+                                    .bg(theme.success),
                             )
                             .child(
                                 div()
@@ -284,10 +295,10 @@ impl Render for DashboardView {
                     .grid()
                     .grid_cols(2)
                     .gap_4()
-                    .child(self.stat_card(&theme, "CPU", rgb(0x4f7cff), format!("{:.0}%", cpu.usage), cpu_stats))
-                    .child(self.stat_card(&theme, "内存", rgb(0x4ade80), format!("{:.0}%", mem.usage_percent), mem_stats))
+                    .child(self.stat_card(&theme, "CPU", theme.brand, format!("{:.0}%", cpu.usage), cpu_stats))
+                    .child(self.stat_card(&theme, "内存", theme.success, format!("{:.0}%", mem.usage_percent), mem_stats))
                     .child(self.gpu_stat_card(&theme, s))
-                    .child(self.stat_card(&theme, disk_title, rgb(0xfbbf24), disk_main, disk_stats)),
+                    .child(self.stat_card(&theme, disk_title, theme.warn, disk_main, disk_stats)),
             )
             // diag 行
             .child(

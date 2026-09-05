@@ -18,10 +18,10 @@ impl Render for AboutView {
         let theme = Theme::dark();
 
         let info_rows: &[(&str, &str)] = &[
-            ("版本", "v2.0.0 (GPUI 重构版)"),
+            ("版本", concat!("v", env!("CARGO_PKG_VERSION"), " (GPUI 重构版)")),
             ("UI 框架", "GPUI 0.2 (Zed, Apache-2.0)"),
             ("后端语言", "Rust (workspace: secm-app / secm-core / secm-datasource)"),
-            ("温度传感", "LHM sidecar (.NET 8, MPL-2.0 进程隔离) → WinRing0 → ACPI"),
+            ("温度传感", "LHM sidecar (.NET 8, MPL-2.0 进程隔离)；WinRing0/ACPI 降级链为后续版本计划"),
             ("平台", "Windows 10/11 (x64)"),
             ("许可证", "MIT"),
             ("历史版本", "Tauri + React v1.x（见原仓库）"),

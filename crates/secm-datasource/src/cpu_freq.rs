@@ -27,7 +27,7 @@ use std::sync::Mutex;
 use windows_sys::Win32::System::Performance::{
     PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterValue,
     PdhOpenQueryW, PDH_CSTATUS_NEW_DATA, PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE,
-    PDH_FMT_DOUBLE, PDH_INVALID_DATA,
+    PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY, PDH_INVALID_DATA,
 };
 use windows_sys::Win32::System::Power::{CallNtPowerInformation, ProcessorInformation};
 use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
@@ -217,14 +217,16 @@ fn ntapi_avg_freq_inner() -> (Option<f32>, Option<String>, f32) {
 ///
 /// 计数器不存在（虚拟机/被禁用）时返回 Err，调用方标记不可用。
 fn pdh_freq_init() -> Result<PdhFreqState, String> {
-    let mut query: isize = 0;
+    // 0.61 起 PDH 句柄为 *mut c_void；结构体存 isize（保证 Mutex 静态可用 Send），
+    // FFI 边界处相互转换
+    let mut query: PDH_HQUERY = std::ptr::null_mut();
     // SAFETY: NULL 数据源 = 本地实时性能数据；query 由 API 写入
     let rc = unsafe { PdhOpenQueryW(std::ptr::null(), 0, &mut query) };
     if rc != 0 {
         return Err(format!("PdhOpenQueryW failed win32=0x{:08X}", rc));
     }
     let path = to_utf16(COUNTER_PROCESSOR_PERF);
-    let mut counter: isize = 0;
+    let mut counter: PDH_HCOUNTER = std::ptr::null_mut();
     // SAFETY: 计数器路径为 NUL 结尾 UTF-16；句柄由 API 写入
     let rc = unsafe { PdhAddEnglishCounterW(query, path.as_ptr(), 0, &mut counter) };
     if rc != 0 {
@@ -248,8 +250,8 @@ fn pdh_freq_init() -> Result<PdhFreqState, String> {
         return Err(format!("PdhCollectQueryData failed win32=0x{:08X}", rc));
     }
     Ok(PdhFreqState {
-        query,
-        counter,
+        query: query as isize,
+        counter: counter as isize,
         last_freq: None,
         failed: false,
         // 记录基线采样时间戳：首调 warmup 据此补齐最小采样间隔
@@ -265,8 +267,9 @@ fn read_perf_percent(counter: isize) -> Option<f32> {
     let mut ty: u32 = 0;
     let mut value = MaybeUninit::<PDH_FMT_COUNTERVALUE>::zeroed();
     // SAFETY: value 为对齐正确的输出缓冲；ty 由 API 写入
-    let rc =
-        unsafe { PdhGetFormattedCounterValue(counter, PDH_FMT_DOUBLE, &mut ty, value.as_mut_ptr()) };
+    let rc = unsafe {
+        PdhGetFormattedCounterValue(counter as PDH_HCOUNTER, PDH_FMT_DOUBLE, &mut ty, value.as_mut_ptr())
+    };
     if rc != PDH_CSTATUS_VALID_DATA && rc != PDH_CSTATUS_NEW_DATA {
         return None;
     }
@@ -355,7 +358,7 @@ fn pdh_perf_freq_inner() -> (Option<f32>, Option<String>) {
     }
     // 每次调用收集新样本（返回码检查：R8 输出 API 名 + 错误码，盲区 B 修复）
     // SAFETY: query 为 PdhOpenQueryW 返回的有效句柄
-    let rc = unsafe { PdhCollectQueryData(s.query) };
+    let rc = unsafe { PdhCollectQueryData(s.query as PDH_HQUERY) };
     if rc != 0 && rc != PDH_CSTATUS_NEW_DATA {
         log::warn!(
             "[cpu_freq] PdhCollectQueryData failed: win32=0x{:08X}, reuse last value or fallback",

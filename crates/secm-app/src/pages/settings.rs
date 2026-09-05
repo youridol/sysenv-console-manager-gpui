@@ -226,7 +226,6 @@ impl SettingsView {
                 .ok();
                 view.update(cx, |this, cx| {
                     // 后台重读计划列表与当前激活
-                    let _ = cx;
                     this.start_reload_plans(cx);
                 })
                 .ok();
@@ -292,7 +291,6 @@ impl SettingsView {
                 })
                 .ok();
                 view.update(cx, |this, cx| {
-                    let _ = cx;
                     this.start_load(cx);
                 })
                 .ok();
@@ -528,7 +526,7 @@ impl Render for SettingsView {
                                             div()
                                                 .size(px(7.0))
                                                 .rounded_full()
-                                                .bg(rgb(0x4ade80)),
+                                                .bg(theme.success),
                                         )
                                     })
                                     .child(
@@ -546,7 +544,7 @@ impl Render for SettingsView {
                                 div()
                                     .text_size(px(11.0))
                                     .text_color(if active {
-                                        rgb(0x4ade80)
+                                        theme.success
                                     } else {
                                         theme.text_muted
                                     })

@@ -36,6 +36,20 @@ pub enum CollectError {
 }
 
 impl CollectError {
+    /// 从 WinApi 错误中提取数字错误码（detail 由 `winapi()` 构造为 "错误码 N"）
+    ///
+    /// 供"服务不存在（1060）"等按错误码分流的调用方使用，
+    /// 替代对整条 detail 字符串的 `contains` 脆弱匹配。
+    pub fn winapi_code(&self) -> Option<u32> {
+        if let CollectError::WinApi { detail, .. } = self {
+            let idx = detail.find("错误码 ")?;
+            let rest = &detail[idx + "错误码 ".len()..];
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            return digits.parse().ok();
+        }
+        None
+    }
+
     /// 构造 WinApi 错误：自动附带 `GetLastError` 错误码
     pub fn winapi(api: &'static str, op: impl Into<String>) -> Self {
         CollectError::WinApi {

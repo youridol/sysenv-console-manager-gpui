@@ -687,16 +687,32 @@ pub fn set_hetero_policy(kind: &str, value: u32) -> Result<(), String> {
         _ => HETERO_THREAD_POLICY_GUID,
     };
 
+    // P1-17：先读 AC 原值（回滚用），写失败时回滚已写侧，避免留下半套状态。
+    // 读失败（部分机器该 GUID 无值）视为"无原值"，回滚时跳过。
+    let ac_backup = power::read_ac_value(None, SUBGROUP_PROCESSOR, setting).ok();
+
     // 写 AC/DC 值索引（None = 当前激活方案，对应 SCHEME_CURRENT 语义）
-    power::write_ac_value(None, SUBGROUP_PROCESSOR, setting, value)
-        .map_err(|e| format!("写入异类策略 AC 值失败: {}", e))?;
-    power::write_dc_value(None, SUBGROUP_PROCESSOR, setting, value)
-        .map_err(|e| format!("写入异类策略 DC 值失败: {}", e))?;
+    if let Err(e) = power::write_ac_value(None, SUBGROUP_PROCESSOR, setting, value) {
+        return Err(format!("写入异类策略 AC 值失败: {}", e));
+    }
+    if let Err(e) = power::write_dc_value(None, SUBGROUP_PROCESSOR, setting, value) {
+        // DC 写失败：回滚 AC 至原值（有原值才回滚），保证 AC/DC 状态一致
+        if let Some(orig) = ac_backup {
+            let _ = power::write_ac_value(None, SUBGROUP_PROCESSOR, setting, orig);
+        }
+        return Err(format!("写入异类策略 DC 值失败（已回滚 AC）: {}", e));
+    }
 
     // 重新激活当前方案（对应 powercfg /s SCHEME_CURRENT，使更改立即生效）
     match power::get_active_scheme() {
         Ok(Some(active)) => {
-            power::set_active_scheme(&active).map_err(|e| format!("应用电源策略失败: {}", e))?;
+            if let Err(e) = power::set_active_scheme(&active) {
+                // 值已写入但未生效：如实提示，不谎报成功（重开应用/重启后生效）
+                return Err(format!(
+                    "异类策略已写入但激活刷新失败（重启后生效）: {}",
+                    e
+                ));
+            }
         }
         Ok(None) => {
             log::warn!("settings: 异类策略写入成功但无激活方案可刷新");

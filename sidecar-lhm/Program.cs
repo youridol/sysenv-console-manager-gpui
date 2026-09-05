@@ -3,7 +3,8 @@
 // 架构：
 //   SECM（Rust, MIT）通过 HTTP 消费本进程输出的 JSON；LibreHardwareMonitorLib（MPL-2.0）
 //   仅在本进程内使用，两进程不链接、不共享内存代码，规避许可对 MIT 主体的传染。
-//   内嵌 ring0 驱动 PawnIO（LGPL-2.1，namazso/PawnIO.Modules），设备 \\.\PawnIO。
+//   内嵌 ring0 驱动 PawnIO（GPL-2.0 + 用户态 IOCTL 通信例外，namazso/PawnIO），
+//   设备 \\.\PawnIO。
 //
 // 权限模型：
 //   PawnIO 设备 DACL 仅 SYSTEM/Administrators 可访问，而 SECM 主进程以普通权限
@@ -11,9 +12,10 @@
 //     - 未提权且非提权子进程 → 弹 UAC 提权重启（追加 --elevated-child），原进程退出
 //     - 用户取消 UAC → 保持普通权限运行，传感器返回 available:false + 需管理员权限错误
 //
-// 端点（契约，见 docs/designs/2026-08-09-lhm-datasource.md §5.1）：
+// 端点（契约）：
 //   GET /health              → 200 {"status":"ok"}
 //   GET /api/lhm/sensors     → 200 传感器 JSON（available/error/cpu 结构）
+//   GET /api/shutdown        → 200 响应后受控退出（释放 LHM/驱动句柄；SECM 退出时调用）
 //   其他路径 → 404；非 GET → 405
 //
 // 启动参数：
@@ -305,7 +307,7 @@ static class Program
     const int ERROR_ACCESS_DENIED = 5;
 
     /// 探测 WinRing0 设备可达性（\\.\WinRing0_1_2_0，OpenLibSys 已签名驱动，
-    /// Secure Boot 下可加载；SECM 驱动安装引导会部署为 SCM 服务）。
+    /// GlobalSign 商业签名【非 WHQL】；SECM 当前版本不自动部署驱动）。
     static (bool ok, string? reason) ProbeWinRing0()
     {
         IntPtr h = CreateFileW(@"\\.\WinRing0_1_2_0", GENERIC_READ, 0, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
@@ -314,7 +316,7 @@ static class Program
             int err = Marshal.GetLastWin32Error();
             string hint = err switch
             {
-                ERROR_FILE_NOT_FOUND => "驱动未就绪：SECM 随包提供 WinRing0x64.sys（WHQL 交叉签名，Secure Boot 可加载），请运行 SECM 的驱动安装引导部署后重试",
+                ERROR_FILE_NOT_FOUND => "驱动未就绪：WinRing0x64.sys（GlobalSign 商业签名）为回退通道，SECM 当前版本不自动部署；请优先部署 PawnIO（见发行包 third_party/PawnIO/ 说明）后重试",
                 ERROR_ACCESS_DENIED => "当前进程无管理员权限（WinRing0 设备需管理员），请以管理员身份运行 SECM 或允许本进程 UAC 提权",
                 _ => $"错误码 0x{err:X8}"
             };
@@ -340,7 +342,7 @@ static class Program
             int err = Marshal.GetLastWin32Error();
             string hint = err switch
             {
-                ERROR_FILE_NOT_FOUND => "驱动未就绪：SECM 随包提供 PawnIO 2.2.0（WHQL 签名 + 有效时间戳，Secure Boot 可加载），请运行 SECM 的驱动安装引导自动部署后重试；若部署失败请检查安全软件（Windows Defender 内核隔离 / 火绒驱动防护 / 360 等）是否拦截 PawnIO.sys 加载",
+                ERROR_FILE_NOT_FOUND => "驱动未就绪：请先安装 PawnIO 2.2.0（SECM 发行包 third_party/PawnIO/ 内含 PawnIO.sys/inf/cat，可用 pnputil 或官方安装器部署）后重试；若部署失败请检查安全软件（Windows Defender 内核隔离 / 火绒驱动防护 / 360 等）是否拦截 PawnIO.sys 加载",
                 ERROR_ACCESS_DENIED => "当前进程无管理员权限（PawnIO 设备仅 SYSTEM/Administrators 可访问），请以管理员身份运行 SECM 或允许本进程 UAC 提权",
                 _ => $"错误码 0x{err:X8}"
             };
@@ -495,10 +497,8 @@ static class Program
                         continue;
                     }
 
-                    // PawnIO 设备预检（LHM 打不开设备时不抛异常，需显式探测）
-                    // PawnIO 设备预检（LHM 打不开设备时不抛异常，需显式探测）
                     // Ring0 双后端预检（LHM 打不开设备时不抛异常，需显式探测）：
-                    // WinRing0（主，WHQL 交叉签名 Secure Boot 可加载）或 PawnIO（回退）任一可达即可
+                    // PawnIO（主，WHQL + 有效时间戳）或 WinRing0（回退，GlobalSign 商业签名）任一可达即可
                     var (probeOk, probeReason) = ProbeRing0Backend();
                     if (!probeOk)
                     {
@@ -508,7 +508,7 @@ static class Program
                     }
 
                     _computer = CreateComputer();
-                    _computer.Open();   // LHM 自动选择可用 ring0 后端（WinRing0 优先/PawnIO 回退）；异常时捕获
+                    _computer.Open();   // LHM 自动选择可用 ring0 后端；异常时捕获
                     _computer.Accept(visitor);
                     UpdateSnapshot();
                     Log("[LhmSidecar] LHM opened, CPU sensors available");
@@ -1014,6 +1014,19 @@ static class Program
                         case "/api/lhm/sensors/":
                             status = 200;
                             body = SerializeSnapshot();
+                            break;
+                        case "/api/shutdown":
+                            status = 200;
+                            body = "{\"status\":\"shutting down\"}";
+                            // 受控退出（P1-3）：响应写出后释放 LHM/驱动句柄再退出进程。
+                            // 对 UAC 提权的本进程同样有效（localhost HTTP 无需特权），
+                            // SECM 主程序退出路径 on_app_quit → lhm::shutdown() 调用本端点。
+                            ThreadPool.QueueUserWorkItem(_ =>
+                            {
+                                Thread.Sleep(300); // 等本连接响应 flush 完成
+                                ShutdownComputer();
+                                Environment.Exit(0);
+                            });
                             break;
                         default:
                             status = 404;

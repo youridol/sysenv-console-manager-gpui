@@ -9,7 +9,9 @@ use crate::error::CollectError;
 use serde::Serialize;
 use std::ptr::{null, null_mut};
 use windows_sys::core::PWSTR;
-use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_MORE_DATA, HANDLE};
+use windows_sys::Win32::Foundation::{
+    ERROR_ACCESS_DENIED, ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, HANDLE,
+};
 use windows_sys::Win32::System::Services::*;
 
 // ============================================================================
@@ -143,9 +145,9 @@ fn open_service(scm: &ScmHandle, name: &str, access: u32) -> Result<ServiceHandl
     Ok(ServiceHandle(handle))
 }
 
-/// 判断错误是否为"服务不存在"（错误码 1060）
+/// 判断错误是否为"服务不存在"（错误码 1060，结构化提取而非字符串包含匹配）
 fn is_service_not_found(e: &CollectError) -> bool {
-    matches!(e, CollectError::WinApi { detail, .. } if detail.contains("错误码 1060"))
+    e.winapi_code() == Some(1060)
 }
 
 // ============================================================================
@@ -213,10 +215,22 @@ pub fn query_service(name: &str) -> Result<Option<ServiceInfo>, CollectError> {
         }
     };
 
-    // 两段式：先拿所需缓冲大小
+    // 两段式：先拿所需缓冲大小（必须以 ERROR_INSUFFICIENT_BUFFER 失败才可信；
+    // 历史缺陷：探测失败被 `let _ =` 吞掉，bytes_needed 为垃圾值时二次调用必败且误导）
     let mut bytes_needed: u32 = 0;
     // SAFETY: QueryServiceConfigW(NULL) 返回所需大小（ERROR_INSUFFICIENT_BUFFER）
-    let _ = unsafe { QueryServiceConfigW(service.0, null_mut(), 0, &mut bytes_needed) };
+    let probe_ok = unsafe { QueryServiceConfigW(service.0, null_mut(), 0, &mut bytes_needed) };
+    if probe_ok == 0 {
+        // SAFETY: GetLastError 紧随失败调用，读取线程局部错误码
+        let probe_err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+        if probe_err != ERROR_INSUFFICIENT_BUFFER {
+            return Err(CollectError::winapi_detailed(
+                "advapi32.QueryServiceConfigW",
+                format!("探测服务 '{}' 配置大小", name),
+                err_desc(probe_err),
+            ));
+        }
+    }
     let mut buf: Vec<u8> = vec![0u8; bytes_needed as usize];
     let mut bytes_needed2: u32 = 0;
     // SAFETY: buf 大小足够容纳 QUERY_SERVICE_CONFIGW（含变长字符串尾随区）
@@ -292,8 +306,19 @@ pub fn enum_services() -> Result<Vec<ServiceInfo>, CollectError> {
     let mut buf: Vec<u8> = vec![0u8; bytes_needed as usize];
     let mut services: Vec<ServiceInfo> = Vec::new();
     let mut resume: u32 = 0;
+    // 迭代上限防御：病态情况下 API 可能反复返回 ERROR_MORE_DATA，
+    // 256 轮（每轮数百服务）远超真实系统规模，防死循环（P1-8）
+    const ENUM_MAX_ROUNDS: u32 = 256;
+    let mut rounds: u32 = 0;
 
     loop {
+        rounds += 1;
+        if rounds > ENUM_MAX_ROUNDS {
+            return Err(CollectError::parse(
+                "服务枚举",
+                &format!("枚举循环超过 {} 轮仍未完成，已中止", ENUM_MAX_ROUNDS),
+            ));
+        }
         let mut bytes_needed_cur: u32 = 0;
         let mut services_returned_cur: u32 = 0;
         // SAFETY: buf 为有效可变缓冲区，长度以 cbBufSize 传入；API 填充
@@ -383,8 +408,19 @@ fn query_start_type_raw(name: &str) -> Result<Option<String>, CollectError> {
         Err(e) => return Err(e),
     };
     let mut bytes_needed: u32 = 0;
-    // SAFETY: 探测大小
-    let _ = unsafe { QueryServiceConfigW(service.0, null_mut(), 0, &mut bytes_needed) };
+    // SAFETY: 探测大小（必须以 ERROR_INSUFFICIENT_BUFFER 失败才可信，同 query_service）
+    let probe_ok = unsafe { QueryServiceConfigW(service.0, null_mut(), 0, &mut bytes_needed) };
+    if probe_ok == 0 {
+        // SAFETY: GetLastError 紧随失败调用，读取线程局部错误码
+        let probe_err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+        if probe_err != ERROR_INSUFFICIENT_BUFFER {
+            return Err(CollectError::winapi_detailed(
+                "advapi32.QueryServiceConfigW",
+                format!("探测服务 '{}' 启动类型大小", name),
+                err_desc(probe_err),
+            ));
+        }
+    }
     let mut buf: Vec<u8> = vec![0u8; bytes_needed as usize];
     let mut bytes_needed2: u32 = 0;
     // SAFETY: buf 容量足够

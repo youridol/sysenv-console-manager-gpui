@@ -145,18 +145,29 @@ impl EnvironmentView {
         cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
             let exec = cx.background_executor().clone();
             // 注册表写全部在后台线程
-            let applied = exec
+            let outcome = exec
                 .spawn(async move { apply_preset_settings(&preset_clone) })
                 .await;
 
             if let Some(view) = weak.upgrade() {
                 view.update(cx, |this, cx| {
                     this.applying = false;
-                    if applied > 0 {
-                        this.status = format!("已应用「{}」预设（{} 项联动）", preset_name, applied);
+                    // P1-14：如实回显成功项数与失败明细
+                    let mut msg = if outcome.applied > 0 {
+                        format!("已应用「{}」预设（{} 项联动）", preset_name, outcome.applied)
+                    } else if outcome.failures.is_empty() {
+                        format!("「{}」全部达标，无需调整", preset_name)
                     } else {
-                        this.status = format!("「{}」全部达标，无需调整", preset_name);
+                        format!("「{}」预设未应用任何变更", preset_name)
+                    };
+                    if !outcome.failures.is_empty() {
+                        msg.push_str(&format!(
+                            "；失败 {} 项: {}",
+                            outcome.failures.len(),
+                            outcome.failures.join("；")
+                        ));
                     }
+                    this.status = msg;
                     cx.notify();
                 })
                 .ok();
@@ -714,10 +725,20 @@ impl EnvironmentView {
     }
 }
 
-/// 后台线程执行的预设套用（注册表写，返回成功联动项数；勿在主线程调用）
-fn apply_preset_settings(preset: &GamePreset) -> u32 {
+/// 预设套用结果（P1-14：历史实现 `let _ = settings::set_*` 吞错并按次数谎报
+/// "已应用 N 项"，现逐项回传成败，失败项明细回显给用户）
+struct PresetApplyOutcome {
+    applied: u32,
+    failures: Vec<String>,
+}
+
+/// 后台线程执行的预设套用（注册表写，逐项回传结果；勿在主线程调用）
+fn apply_preset_settings(preset: &GamePreset) -> PresetApplyOutcome {
     use secm_core::settings;
-    let mut applied = 0u32;
+    let mut outcome = PresetApplyOutcome {
+        applied: 0,
+        failures: Vec::new(),
+    };
     for s in &preset.settings {
         if s.key.is_empty() {
             continue; // 纯检测项不可切换
@@ -728,43 +749,45 @@ fn apply_preset_settings(preset: &GamePreset) -> u32 {
         let recommended_on = s.recommended.contains("开启")
             || s.recommended.contains("高性能")
             || s.recommended.contains("卓越性能");
-        match s.key.as_str() {
-            "hags" => {
-                let _ = settings::set_hags_state(recommended_on);
-                applied += 1;
-            }
-            "game_mode" => {
-                let _ = settings::set_game_mode_state(recommended_on);
-                applied += 1;
-            }
-            "vrr" => {
-                let _ = settings::set_vrr_state(recommended_on);
-                applied += 1;
-            }
+        let result: Result<(), String> = match s.key.as_str() {
+            "hags" => settings::set_hags_state(recommended_on).map(|_| ()),
+            "game_mode" => settings::set_game_mode_state(recommended_on).map(|_| ()),
+            "vrr" => settings::set_vrr_state(recommended_on).map(|_| ()),
             "mouse_precision" => {
-                // 推荐"关闭"即禁用增强指针精确度
-                let _ = settings::set_mouse_precision(!recommended_on);
-                applied += 1;
+                // 推荐"关闭"（recommended_on=false）→ 禁用增强指针精确度：
+                // set_mouse_precision(false) 即 SPI_SETMOUSE 写入 [0,0,0]。
+                // 历史 bug：曾写 !recommended_on，推荐"关闭"时反而启用（P1-1 修复）
+                settings::set_mouse_precision(recommended_on).map(|_| ())
             }
             "power_plan" => {
                 // 按推荐名激活对应电源计划
-                if let Ok(plans) = settings::get_power_plans() {
-                    let target = plans
-                        .iter()
-                        .find(|p| s.recommended.contains("高性能") && p.name.contains("高性能"))
-                        .or_else(|| {
-                            plans
-                                .iter()
-                                .find(|p| s.recommended.contains("卓越") && p.name.contains("卓越"))
-                        });
-                    if let Some(plan) = target {
-                        let _ = settings::set_power_plan(&plan.guid);
-                        applied += 1;
+                match settings::get_power_plans() {
+                    Err(e) => Err(format!("枚举电源计划失败: {}", e)),
+                    Ok(plans) => {
+                        let target = plans
+                            .iter()
+                            .find(|p| s.recommended.contains("高性能") && p.name.contains("高性能"))
+                            .or_else(|| {
+                                plans.iter().find(|p| {
+                                    s.recommended.contains("卓越") && p.name.contains("卓越")
+                                })
+                            });
+                        match target {
+                            Some(plan) => settings::set_power_plan(&plan.guid).map(|_| ()),
+                            None => Err(format!(
+                                "未找到推荐电源计划（推荐: {}）",
+                                s.recommended
+                            )),
+                        }
                     }
                 }
             }
-            _ => {}
+            _ => Ok(()),
+        };
+        match result {
+            Ok(()) => outcome.applied += 1,
+            Err(e) => outcome.failures.push(format!("{}: {}", s.label, e)),
         }
     }
-    applied
+    outcome
 }

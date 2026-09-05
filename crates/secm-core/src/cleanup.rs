@@ -112,25 +112,15 @@ pub fn set_process_priority(pid: u32, priority: &str) -> CleanupResult {
     )
 }
 
-/// DNS 缓存刷新
+/// DNS 缓存刷新（经 secm_datasource::dns 驱动，替代历史内联 FFI 重复实现）
 pub fn flush_dns() -> CleanupResult {
     #[cfg(windows)]
-    {
-        extern "system" {
-            fn DnsFlushResolverCache() -> i32;
-        }
-        // SAFETY: DnsFlushResolverCache 为 dnsapi.dll 标准导出，无参调用
-        let ok = unsafe { DnsFlushResolverCache() };
-        if ok == 0 {
-            return CleanupResult::err("DNS 缓存刷新", "DNS 缓存刷新失败".to_string());
-        }
+    match secm_datasource::dns::flush_dns() {
+        Ok(r) if r.success => {}
+        Ok(r) => return CleanupResult::err("DNS 缓存刷新", r.message),
+        Err(e) => return CleanupResult::err("DNS 缓存刷新", e.to_string()),
     }
     CleanupResult::ok("DNS 缓存刷新", 0, "DNS 解析缓存已成功刷新".to_string())
-}
-
-/// 进程是否以管理员运行（复用 settings::is_admin 语义；此处为独立实现避免依赖循环）
-pub fn is_admin() -> bool {
-    crate::settings::is_admin()
 }
 
 // ============================================================================
@@ -160,13 +150,23 @@ fn clear_readonly(path: &std::path::Path) {
 fn clear_readonly(_path: &std::path::Path) {}
 
 /// 递归清除目录树内所有文件的只读属性（供 remove_dir_all 前调用）
+/// 深度上限防御：畸形/恶意深目录树可致栈溢出，超限直接停止
+const FS_WALK_MAX_DEPTH: usize = 64;
+
 fn clear_readonly_recursive(path: &std::path::Path) {
+    clear_readonly_depth(path, 0);
+}
+
+fn clear_readonly_depth(path: &std::path::Path, depth: usize) {
+    if depth > FS_WALK_MAX_DEPTH {
+        return;
+    }
     if let Ok(entries) = std::fs::read_dir(path) {
         for entry in entries.flatten() {
             let p = entry.path();
             clear_readonly(&p);
             if p.is_dir() {
-                clear_readonly_recursive(&p);
+                clear_readonly_depth(&p, depth + 1);
             }
         }
     }
@@ -174,24 +174,35 @@ fn clear_readonly_recursive(path: &std::path::Path) {
 
 /// 标记文件为"重启时删除"（处理被占用文件的标准方案，CCleaner 同款）
 /// 通过 MoveFileEx + MOVEFILE_DELAY_UNTIL_REBOOT 注册到系统待删除队列。
+///
+/// 测试副作用隔离：测试构建下 no-op——真实调用会把测试文件登记进系统
+/// PendingFileRenameOperations 队列，产生跨重启的真实系统副作用。
 #[cfg(windows)]
 fn mark_delete_on_reboot(path: &std::path::Path) -> bool {
-    use std::os::windows::ffi::OsStrExt;
-    extern "system" {
-        fn MoveFileExW(
-            lpExistingFileName: *const u16,
-            lpNewFileName: *const u16,
-            dwFlags: u32,
-        ) -> i32;
+    #[cfg(test)]
+    {
+        let _ = path;
+        return false;
     }
-    const MOVEFILE_DELAY_UNTIL_REBOOT: u32 = 0x4;
-    let wide: Vec<u16> = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    // SAFETY: MoveFileExW 是 kernel32 标准导出，传入 NUL 结尾宽字符串
-    unsafe { MoveFileExW(wide.as_ptr(), std::ptr::null(), MOVEFILE_DELAY_UNTIL_REBOOT) != 0 }
+    #[cfg(not(test))]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        extern "system" {
+            fn MoveFileExW(
+                lpExistingFileName: *const u16,
+                lpNewFileName: *const u16,
+                dwFlags: u32,
+            ) -> i32;
+        }
+        const MOVEFILE_DELAY_UNTIL_REBOOT: u32 = 0x4;
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: MoveFileExW 是 kernel32 标准导出，传入 NUL 结尾宽字符串
+        unsafe { MoveFileExW(wide.as_ptr(), std::ptr::null(), MOVEFILE_DELAY_UNTIL_REBOOT) != 0 }
+    }
 }
 
 #[cfg(not(windows))]
@@ -219,11 +230,24 @@ fn delete_with_retry(path: &std::path::Path) -> std::io::Result<()> {
 /// Helper: delete files in a directory recursively and return bytes freed.
 /// Does NOT remove the directory itself — only its contents.
 /// Skips reparse points (symlinks/junctions) to prevent unintended deletion.
+/// 深度上限 FS_WALK_MAX_DEPTH 防御畸形深树栈溢出。
 fn clean_directory(path: &PathBuf) -> (u64, Vec<String>) {
+    clean_directory_depth(path, 0)
+}
+
+fn clean_directory_depth(path: &PathBuf, depth: usize) -> (u64, Vec<String>) {
     let mut bytes_freed: u64 = 0;
     let mut errors: Vec<String> = Vec::new();
 
     if !path.exists() {
+        return (0, errors);
+    }
+    if depth > FS_WALK_MAX_DEPTH {
+        errors.push(format!(
+            "目录嵌套超过 {} 层，跳过: {}",
+            FS_WALK_MAX_DEPTH,
+            path.display()
+        ));
         return (0, errors);
     }
 
@@ -242,7 +266,7 @@ fn clean_directory(path: &PathBuf) -> (u64, Vec<String>) {
                         );
                         continue;
                     }
-                    let (sub_bytes, sub_errors) = clean_directory(&entry_path);
+                    let (sub_bytes, sub_errors) = clean_directory_depth(&entry_path, depth + 1);
                     bytes_freed += sub_bytes;
                     errors.extend(sub_errors);
                 } else {
@@ -356,15 +380,27 @@ fn get_amd_cache_paths() -> Vec<PathBuf> {
 
 /// 递归删除空目录（清理后移除残留的缓存目录结构）
 /// 仅删除空目录，非空时 remove_dir 失败无害。
+/// 顶层根目录本身不删除（与 clean_directory"仅删内容"语义对齐）；
+/// junction/符号链接整体跳过：read_dir 会跟随链接进入目标目录，
+/// 递归删除会把目标内的空目录一并清掉（越权删除防护）。
 fn remove_empty_dirs(path: &std::path::Path) {
+    remove_empty_dirs_inner(path, true);
+}
+
+fn remove_empty_dirs_inner(path: &std::path::Path, is_root: bool) {
+    if is_reparse_point(path) {
+        return;
+    }
     if let Ok(entries) = std::fs::read_dir(path) {
         for entry in entries.flatten() {
             if entry.path().is_dir() {
-                remove_empty_dirs(&entry.path());
+                remove_empty_dirs_inner(&entry.path(), false);
             }
         }
     }
-    let _ = std::fs::remove_dir(path);
+    if !is_root {
+        let _ = std::fs::remove_dir(path);
+    }
 }
 
 /// 通用：清理一组路径并汇总结果（success 反映真实删除结果）
@@ -375,6 +411,16 @@ fn clean_paths(paths: &[PathBuf], operation: &str) -> CleanupResult {
     let mut has_errors = false;
     let mut pending_reboot = 0u32;
     for path in paths {
+        // 根路径 reparse point 防御：缓存位置被预植 junction/符号链接时整体跳过，
+        // 防止递归清空链接目标（如系统目录）——越权删除防护（P1-5）
+        if is_reparse_point(path) {
+            messages.push(format!(
+                "跳过 reparse point（junction/符号链接）: {}",
+                path.display()
+            ));
+            has_errors = true;
+            continue;
+        }
         if path.exists() {
             let (bytes, errors) = clean_directory(path);
             total_bytes += bytes;
@@ -687,7 +733,7 @@ pub fn clean_temp_files() -> CleanupResult {
 /// Trim the current process working set to free physical memory.
 /// Note: this only affects the current process, not system-wide standby memory.
 pub fn trim_process_working_set() -> CleanupResult {
-    if !is_admin() {
+    if !crate::settings::is_admin() {
         return CleanupResult::err("工作集修剪", "需要管理员权限".to_string());
     }
 

@@ -4,11 +4,12 @@
 // 并发模型：服务枚举（数百服务，慢）后台线程执行；启停/启动类型为系统 API
 // 调用，后台执行 + 完成后延迟后台刷新状态。主线程仅渲染。
 
-use gpui::{div, px, rgb, SharedString, Window, Context, Render, WeakEntity};
+use gpui::{div, px, rgb, Entity, SharedString, Window, Context, Render, WeakEntity};
 use gpui::prelude::*;
 use secm_core::settings::{self, ServiceInfo};
 
 use crate::theme::Theme;
+use crate::ui::text_input::{ChangeText, TextField};
 
 pub struct ServicesView {
     services: Vec<ServiceInfo>,
@@ -19,16 +20,27 @@ pub struct ServicesView {
     loading: bool,
     /// 操作进行中（互斥）
     op_busy: bool,
+    /// 搜索输入框（P2：历史为静态占位文案，搜索从未接线）
+    search_input: Entity<TextField>,
 }
 
 impl ServicesView {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        let search_input = cx.new(|cx| TextField::new("", "搜索服务名/显示名", cx));
+        cx.subscribe(
+            &search_input,
+            |this, field: Entity<TextField>, _ev: &ChangeText, cx| {
+                this.set_keyword(field.read(cx).value(), cx);
+            },
+        )
+        .detach();
         let mut v = Self {
             services: Vec::new(),
             keyword: SharedString::from(""),
             status: SharedString::from("正在加载服务列表…"),
             loading: false,
             op_busy: false,
+            search_input,
         };
         v.start_load(cx);
         v
@@ -95,8 +107,7 @@ impl ServicesView {
             .collect()
     }
 
-    /// 搜索关键词更新（GPUI TextInput 接入后使用）
-    #[allow(dead_code)]
+    /// 搜索关键词更新（由搜索输入框 ChangeText 订阅驱动）
     fn set_keyword(&mut self, kw: SharedString, cx: &mut Context<Self>) {
         self.keyword = kw;
         cx.notify();
@@ -282,15 +293,11 @@ impl ServicesView {
                     .text_color(theme.text_muted)
                     .child("🔍"),
             )
+            // 真实输入框（P2：搜索功能接线）
             .child(
                 div()
-                    .text_size(px(13.0))
-                    .text_color(theme.text)
-                    .child(if self.keyword.is_empty() {
-                        SharedString::from("搜索服务名/显示名…（待接入输入）")
-                    } else {
-                        self.keyword.clone()
-                    }),
+                    .flex_1()
+                    .child(self.search_input.clone()),
             )
     }
 

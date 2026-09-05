@@ -18,7 +18,6 @@
 //
 // 参考：`netsh interface ip` / `interface ipv6` 命令参考（Windows 文档）。
 use serde::{Deserialize, Serialize};
-use std::process::Command;
 use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE};
 use winreg::RegKey;
 
@@ -140,15 +139,19 @@ fn netsh_quoted(name: &str) -> String {
 
 /// 执行 netsh 并返回 stdout 文本；失败返回 Err(netsh 错误消息解码)
 ///
-/// CREATE_NO_WINDOW（0x08000000）防止 GUI 应用弹出控制台黑窗（与 proc_util 一致）。
+/// CREATE_NO_WINDOW（0x08000000）防止 GUI 应用弹出控制台黑窗（与 proc_util 一致）；
+/// 20s 超时（P1-10）：netsh 卡死（驱动/网络栈异常）时杀树返回，不悬挂后台任务。
 fn run_netsh(args: &[&str]) -> Result<String, String> {
-    use std::os::windows::process::CommandExt;
-    let out = Command::new("netsh")
-        .args(args)
-        .creation_flags(0x08000000)
-        .output()
-        .map_err(|e| format!("netsh 启动失败: {}", e))?;
-    if out.status.success() {
+    let out = crate::proc_util::run_command_with_timeout(
+        "netsh",
+        args,
+        std::time::Duration::from_secs(20),
+    )
+    .ok_or_else(|| "netsh 启动失败（CreateProcess）".to_string())?;
+    if out.timed_out {
+        return Err("netsh 执行超时（20s）".to_string());
+    }
+    if out.success {
         Ok(decode_ansi(&out.stdout))
     } else {
         // 错误消息优先取 stderr，其次 stdout（netsh 版本间输出位置有差异）
@@ -157,23 +160,17 @@ fn run_netsh(args: &[&str]) -> Result<String, String> {
         let msg = if err.trim().is_empty() { out2 } else { err };
         let trimmed = msg.trim().to_string();
         Err(if trimmed.is_empty() {
-            format!("netsh 退出码 {}", out.status.code().unwrap_or(-1))
+            "netsh 执行失败（无输出）".to_string()
         } else {
             trimmed
         })
     }
 }
 
-/// 解码 netsh 输出：优先 UTF-8（UTF-8 代码页系统），回退 GBK（中文 ANSI 代码页）
+/// 解码 netsh 输出：委托 proc_util::decode_ps（UTF-8 优先 → GBK 兜底），
+/// 收敛历史重复实现（审计 P2）
 fn decode_ansi(bytes: &[u8]) -> String {
-    if bytes.is_empty() {
-        return String::new();
-    }
-    if let Ok(s) = std::str::from_utf8(bytes) {
-        return s.to_string();
-    }
-    let (cow, _, _) = encoding_rs::GBK.decode(bytes);
-    cow.into_owned()
+    crate::proc_util::decode_ps(bytes)
 }
 
 /// 执行单个步骤并包装为 ApplyStep（成功/失败均不中断后续步骤）
@@ -643,13 +640,11 @@ fn current_dns_ips(ifname: &str) -> Result<Vec<String>, String> {
     Ok(ips)
 }
 
-/// 启用/修改单个 IP 的 DoH（Set-DnsClientDohServerAddress）
+/// 构造"启用/修改 DoH"的 PowerShell 命令体（双模型兼容：接口级 / IP 级全局模型）
 ///
-/// 双模型兼容：接口级模块带 -InterfaceAlias；本机 IP 级模型（无该参数）直接 -ServerAddress。
-/// 注意：IP 级模型的 cmdlet 仅能修改已存在的 DoH 记录（Query 定位），
-/// 对无记录 IP 报"找不到实例"——错误如实传播，由前端提示用户。
-fn set_doh(ifname: &str, ip: &str, url: &str) -> Result<String, String> {
-    let script = format!(
+/// 仅构造不执行——由 set_doh_config 批量组装为单次 PowerShell 调用（P1-14）。
+fn set_doh_command(ifname: &str, ip: &str, url: &str) -> String {
+    format!(
         "if ((Get-Command Set-DnsClientDohServerAddress).Parameters.ContainsKey('InterfaceAlias')) {{\n  \
          Set-DnsClientDohServerAddress -InterfaceAlias '{ifname}' -ServerAddress '{ip}' -DohTemplate '{url}'\n\
          }} else {{\n  \
@@ -658,13 +653,12 @@ fn set_doh(ifname: &str, ip: &str, url: &str) -> Result<String, String> {
         ifname = ps_esc(ifname),
         ip = ps_esc(ip),
         url = ps_esc(url)
-    );
-    crate::proc_util::run_ps_result(&script)
+    )
 }
 
-/// 移除单个 IP 的 DoH（Remove-DnsClientDohServerAddress；调用方已保证目标存在才调用）
-fn remove_doh(ifname: &str, ip: &str) -> Result<String, String> {
-    let script = format!(
+/// 构造"移除 DoH"的 PowerShell 命令体（双模型兼容；调用方已保证目标存在才调用）
+fn remove_doh_command(ifname: &str, ip: &str) -> String {
+    format!(
         "if ((Get-Command Remove-DnsClientDohServerAddress).Parameters.ContainsKey('InterfaceAlias')) {{\n  \
          Remove-DnsClientDohServerAddress -InterfaceAlias '{ifname}' -ServerAddress '{ip}' -Confirm:$false\n\
          }} else {{\n  \
@@ -672,8 +666,7 @@ fn remove_doh(ifname: &str, ip: &str) -> Result<String, String> {
          }}",
         ifname = ps_esc(ifname),
         ip = ps_esc(ip)
-    );
-    crate::proc_util::run_ps_result(&script)
+    )
 }
 
 /// get_doh_config 命令后端：查询接口 DoH 配置（只读，无需管理员）
@@ -733,68 +726,135 @@ pub fn set_doh_config(ifname: &str, entries: &[DohEntryInput]) -> NetworkConfigA
         }
     };
 
+    // 组装动作列表：(步骤名, PowerShell 命令体)；无操作项直接落一步成功/失败
+    let mut actions: Vec<(String, String)> = Vec::new();
+
     // 空 entries = 清空接口全部 DoH
     if entries.is_empty() {
-        if current_doh.is_empty() {
+        // P1-16：IP 级全局 DoH 模型下 query_doh_entries 返回全机记录，
+        // 清空路径限定"本接口当前 DNS 服务器 ∩ 已启用 DoH"，防止误删其它接口的 DoH
+        let scoped: Vec<String> = current_doh
+            .iter()
+            .filter(|ip| dns_ips.iter().any(|d| d.as_str() == ip.as_str()))
+            .cloned()
+            .collect();
+        if scoped.is_empty() {
             steps.push(ApplyStep {
                 name: "DoH 清空".to_string(),
                 ok: true,
-                message: "接口当前无 DoH 记录，无需清理".to_string(),
+                message: "接口当前无可清理的 DoH 记录".to_string(),
             });
         } else {
-            for ip in &current_doh {
-                steps.push(run_step(&format!("DoH 移除 {}", ip), || {
-                    remove_doh(&ifname, ip)
-                }));
+            for ip in &scoped {
+                actions.push((format!("DoH 移除 {}", ip), remove_doh_command(&ifname, ip)));
             }
         }
-        let all_ok = steps.iter().all(|s| s.ok);
-        return NetworkConfigApplyResult { steps, all_ok };
+    } else {
+        // 逐条校验并组装（每 IP 一动作）
+        for entry in entries {
+            let ip = entry.ip.trim().to_string();
+            let display = if ip.is_empty() {
+                "(空)".to_string()
+            } else {
+                ip.clone()
+            };
+            let name = format!("DoH {}", display);
+            // 防御：IP 必须是接口当前 DNS 服务器
+            if ip.is_empty() || !dns_ips.iter().any(|d| d == &ip) {
+                steps.push(ApplyStep {
+                    name,
+                    ok: false,
+                    message: format!("该 IP 不是当前 DNS 服务器: {}", display),
+                });
+                continue;
+            }
+            match entry.template.as_deref().map(str::trim) {
+                // 移除 DoH（幂等：无记录视为成功）
+                None | Some("") => {
+                    if current_doh.contains(&ip) {
+                        actions.push((name, remove_doh_command(&ifname, &ip)));
+                    } else {
+                        steps.push(ApplyStep {
+                            name,
+                            ok: true,
+                            message: "该 IP 当前未启用 DoH，无需移除（幂等）".to_string(),
+                        });
+                    }
+                }
+                // 启用 DoH（先校验模板 URL）
+                Some(url) => {
+                    if let Err(e) = validate_doh_template(url) {
+                        steps.push(ApplyStep {
+                            name,
+                            ok: false,
+                            message: e,
+                        });
+                        continue;
+                    }
+                    actions.push((name, set_doh_command(&ifname, &ip, url)));
+                }
+            }
+        }
     }
 
-    // 逐条校验并执行（每 IP 一步）
-    for entry in entries {
-        let ip = entry.ip.trim().to_string();
-        let display = if ip.is_empty() {
-            "(空)".to_string()
-        } else {
-            ip.clone()
-        };
-        let name = format!("DoH {}", display);
-        // 防御：IP 必须是接口当前 DNS 服务器
-        if ip.is_empty() || !dns_ips.iter().any(|d| d == &ip) {
-            steps.push(ApplyStep {
-                name,
-                ok: false,
-                message: format!("该 IP 不是当前 DNS 服务器: {}", display),
-            });
-            continue;
+    // 批量执行：单次 PowerShell 进程完成全部 Set/Remove（P1-14：消除 2N+1 次
+    // 进程冷启动）。每步 try/catch 输出 "SECMSTEP\t<序号>\tOK|ERR\t<消息>"；
+    // $ErrorActionPreference='Stop' 把 cmdlet 非终止错误转为可捕获异常，
+    // 错误经 stdout 回传（不进 stderr），避免 run_ps_result 的 stderr 严格检查误伤
+    if !actions.is_empty() {
+        let mut script = String::from("$ProgressPreference='SilentlyContinue'\n");
+        for (i, (_, body)) in actions.iter().enumerate() {
+            script.push_str(&format!(
+                "try {{ $ErrorActionPreference='Stop'; {body} | Out-Null; \"SECMSTEP`t{i}`tOK`t成功\" }} catch {{ \"SECMSTEP`t{i}`tERR`t$($_.Exception.Message)\" }}\n"
+            ));
         }
-        match entry.template.as_deref().map(str::trim) {
-            // 移除 DoH（幂等：无记录视为成功）
-            None | Some("") => {
-                if current_doh.contains(&ip) {
-                    steps.push(run_step(&name, || remove_doh(&ifname, &ip)));
-                } else {
-                    steps.push(ApplyStep {
-                        name,
-                        ok: true,
-                        message: "该 IP 当前未启用 DoH，无需移除（幂等）".to_string(),
-                    });
+        match crate::proc_util::run_ps_result(&script) {
+            Ok(out) => {
+                let mut results: Vec<Option<(bool, String)>> = vec![None; actions.len()];
+                for line in out.lines() {
+                    let mut parts = line.splitn(4, '\t');
+                    if parts.next() != Some("SECMSTEP") {
+                        continue;
+                    }
+                    let idx = parts.next().and_then(|s| s.parse::<usize>().ok());
+                    let status = parts.next().unwrap_or("");
+                    let msg = parts.next().unwrap_or("").trim().to_string();
+                    if let Some(i) = idx {
+                        if i < results.len() {
+                            results[i] = Some((
+                                status == "OK",
+                                if msg.is_empty() {
+                                    status.to_string()
+                                } else {
+                                    msg
+                                },
+                            ));
+                        }
+                    }
+                }
+                for (i, (name, _)) in actions.iter().enumerate() {
+                    match &results[i] {
+                        Some((ok, msg)) => steps.push(ApplyStep {
+                            name: name.clone(),
+                            ok: *ok,
+                            message: msg.clone(),
+                        }),
+                        None => steps.push(ApplyStep {
+                            name: name.clone(),
+                            ok: false,
+                            message: "步骤无结果输出（脚本异常中断）".to_string(),
+                        }),
+                    }
                 }
             }
-            // 启用 DoH（先校验模板 URL）
-            Some(url) => {
-                if let Err(e) = validate_doh_template(url) {
+            Err(e) => {
+                for (name, _) in &actions {
                     steps.push(ApplyStep {
-                        name,
+                        name: name.clone(),
                         ok: false,
-                        message: e,
+                        message: format!("批量执行失败: {}", e),
                     });
-                    continue;
                 }
-                let url = url.to_string();
-                steps.push(run_step(&name, || set_doh(&ifname, &ip, &url)));
             }
         }
     }
@@ -811,7 +871,8 @@ pub fn set_doh_config(ifname: &str, entries: &[DohEntryInput]) -> NetworkConfigA
 ///
 /// 流程：校验格式 → 定位网卡注册表实例键（NetCfgInstanceId == 接口 GUID）→
 /// 备份原值 → 写入 NetworkAddress → 禁用/启用网卡使生效。
-/// 返回消息含原值备份提示（回滚方式：重新填写原值应用，或网卡高级属性清空）。
+/// 任一重启步骤失败时自动回滚注册表原值并尽力重新启用网卡（P1-6），
+/// 返回消息含回滚结果与手动恢复指引。
 ///
 /// 注意：重启网卡瞬间会短暂断网（毫秒级~秒级），部分网卡驱动不支持覆盖 MAC，
 /// 失败时原值已备份于返回消息，可恢复。
@@ -850,12 +911,66 @@ pub fn set_network_mac(ifname: &str, mac: &str, guid: Option<&str>) -> Result<St
         .set_value(REG_NETWORK_ADDRESS, &clean)
         .map_err(|e| format!("写入注册表 NetworkAddress 失败: {}（错误码 {}）", e, e.raw_os_error().unwrap_or(-1)))?;
 
-    // 5. 重启网卡使生效（禁用→启用）
+    // 5. 重启网卡使生效（禁用→启用）；任一步失败即回滚注册表原值并尽力
+    //    把网卡恢复到启用态，避免接口永久停留在禁用状态（P1-6 修复）
     let quoted = netsh_quoted(ifname);
-    run_netsh(&["interface", "set", "interface", &quoted, "admin=disable"])
-        .map_err(|e| format!("禁用网卡失败（注册表已写入，恢复原值需手动）：{}", e))?;
-    run_netsh(&["interface", "set", "interface", &quoted, "admin=enable"])
-        .map_err(|e| format!("启用网卡失败（网卡当前为禁用状态）：{}", e))?;
+    // 回滚闭包：恢复 NetworkAddress 原值（无备份则删除覆盖键值）+ 尽力启用网卡
+    let restore_backup = |instance: &RegKey| -> Vec<String> {
+        let mut msgs = Vec::new();
+        let r = match &backup {
+            Some(b) => instance
+                .set_value(REG_NETWORK_ADDRESS, b)
+                .map(|_| format!("已回滚 NetworkAddress 为原值 {}", b)),
+            None => instance
+                .delete_value(REG_NETWORK_ADDRESS)
+                .map(|_| "已删除 NetworkAddress 覆盖（恢复系统默认地址）".to_string()),
+        };
+        match r {
+            Ok(m) => msgs.push(m),
+            Err(e) => msgs.push(format!(
+                "回滚注册表失败（请手动在网卡高级属性中恢复原地址）: {}",
+                e
+            )),
+        }
+        match run_netsh(&["interface", "set", "interface", &quoted, "admin=enable"]) {
+            Ok(_) => msgs.push("已重新启用网卡".to_string()),
+            Err(e) => msgs.push(format!(
+                "网卡重新启用失败（请到网络连接/设备管理器手动启用）: {}",
+                e
+            )),
+        }
+        msgs
+    };
+
+    if let Err(disable_err) = run_netsh(&["interface", "set", "interface", &quoted, "admin=disable"])
+    {
+        // 禁用失败：注册表已是新 MAC 但活动 MAC 未变 → 立即回滚消除不一致
+        let mut msgs = vec![format!("禁用网卡失败: {}", disable_err)];
+        msgs.extend(restore_backup(&instance));
+        return Err(msgs.join("；"));
+    }
+
+    // 启用：驱动就绪可能滞后，重试 3 次（间隔 500ms）
+    let mut enable_ok = false;
+    let mut last_enable_err = String::new();
+    for _ in 0..3 {
+        match run_netsh(&["interface", "set", "interface", &quoted, "admin=enable"]) {
+            Ok(_) => {
+                enable_ok = true;
+                break;
+            }
+            Err(e) => {
+                last_enable_err = e;
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        }
+    }
+    if !enable_ok {
+        // 启用彻底失败：回滚注册表并再兜底启用一次，接口不停留在禁用态
+        let mut msgs = vec![format!("启用网卡失败（已重试 3 次）: {}", last_enable_err)];
+        msgs.extend(restore_backup(&instance));
+        return Err(msgs.join("；"));
+    }
 
     let backup_hint = match backup {
         Some(b) => format!("原物理地址 {} 已备份，如需恢复请重新应用该值。", b),

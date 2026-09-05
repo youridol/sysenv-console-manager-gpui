@@ -32,3 +32,11 @@ rel.out
 rel.err
 diag-*.out
 diag-*.err
+
+# crates/icons 仅 icon.ico（exe 资源嵌入）与 32x32.png（托盘嵌入）被源码引用；
+# 其余为 Tauri/历史多尺寸图标产物（Square*/StoreLogo/@2x/icns 等），非源码不入库
+/crates/icons/*.png
+/crates/icons/*.icns
+/crates/icons/*.ico
+!/crates/icons/icon.ico
+!/crates/icons/32x32.png

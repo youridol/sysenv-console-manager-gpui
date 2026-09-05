@@ -380,19 +380,19 @@ fn read_virtual_memory() -> String {
 /// 检查服务运行状态（纯 Rust 驱动：secm-datasource::service::query_service）
 ///
 /// 替代旧 `sc query` / legacy 回退文本解析（新仓库无外部进程依赖）。
-/// 语义与现状一致：
+/// 语义：
 /// - 服务存在且 Running → "运行中"
 /// - 服务存在但非 Running → "已停止"
 /// - 服务不存在（Ok(None)）→ "未安装"
-/// - 查询失败 → 打 warn 日志降级为 "未安装"
+/// - 查询失败 → "检测失败"（P1-19：历史实现降级为"未安装"，误导预设判定）
 fn check_service(name: &str) -> String {
     match secm_datasource::service::query_service(name) {
         Ok(Some(info)) if info.status == "Running" => "运行中".into(),
         Ok(Some(_)) => "已停止".into(),
         Ok(None) => "未安装".into(),
         Err(e) => {
-            log::warn!("game_env: 服务 '{}' 状态查询降级为未安装: {}", name, e);
-            "未安装".into()
+            log::warn!("game_env: 服务 '{}' 状态查询失败: {}", name, e);
+            "检测失败".into()
         }
     }
 }

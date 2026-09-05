@@ -223,6 +223,74 @@ pub fn write_dc_value(
     Ok(())
 }
 
+/// 读取 AC 值索引（`PowerReadACValueIndex` 等价）
+///
+/// `scheme`：传 None 表示当前激活方案。读取失败返回 Err（调用方决定回退语义）。
+pub fn read_ac_value(
+    scheme: Option<&str>,
+    subgroup: &str,
+    setting: &str,
+) -> Result<u32, CollectError> {
+    let scheme_guid = match scheme {
+        Some(s) => Some(guid_from_str(s)?),
+        None => get_active_scheme()?.map(|s| guid_from_str(&s)).transpose()?,
+    };
+    let subgroup_guid = guid_from_str(subgroup)?;
+    let setting_guid = guid_from_str(setting)?;
+    let mut value: u32 = 0;
+    // SAFETY: 各 GUID 均为栈上有效引用；value 为出参
+    let rc = unsafe {
+        PowerReadACValueIndex(
+            std::ptr::null_mut::<HKEY>() as HKEY,
+            scheme_guid.as_ref().map_or(std::ptr::null(), |g| g as *const _),
+            &subgroup_guid,
+            &setting_guid,
+            &mut value,
+        )
+    };
+    if rc != ERROR_SUCCESS {
+        return Err(CollectError::winapi_detailed(
+            "powrprof.PowerReadACValueIndex",
+            "读取 AC 电源设置",
+            format!("错误码 {}", rc),
+        ));
+    }
+    Ok(value)
+}
+
+/// 读取 DC 值索引（`PowerReadDCValueIndex` 等价）
+pub fn read_dc_value(
+    scheme: Option<&str>,
+    subgroup: &str,
+    setting: &str,
+) -> Result<u32, CollectError> {
+    let scheme_guid = match scheme {
+        Some(s) => Some(guid_from_str(s)?),
+        None => get_active_scheme()?.map(|s| guid_from_str(&s)).transpose()?,
+    };
+    let subgroup_guid = guid_from_str(subgroup)?;
+    let setting_guid = guid_from_str(setting)?;
+    let mut value: u32 = 0;
+    // SAFETY: 各 GUID 均为栈上有效引用；value 为出参
+    let rc = unsafe {
+        PowerReadDCValueIndex(
+            std::ptr::null_mut::<HKEY>() as HKEY,
+            scheme_guid.as_ref().map_or(std::ptr::null(), |g| g as *const _),
+            &subgroup_guid,
+            &setting_guid,
+            &mut value,
+        )
+    };
+    if rc != ERROR_SUCCESS {
+        return Err(CollectError::winapi_detailed(
+            "powrprof.PowerReadDCValueIndex",
+            "读取 DC 电源设置",
+            format!("错误码 {}", rc),
+        ));
+    }
+    Ok(value)
+}
+
 /// 复制电源计划（`powercfg /duplicatescheme <guid>` 等价），返回新计划 GUID
 pub fn duplicate_scheme(source_guid: &str) -> Result<String, CollectError> {
     let source = guid_from_str(source_guid)?;

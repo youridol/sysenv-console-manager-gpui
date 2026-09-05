@@ -80,7 +80,7 @@ impl NetworkView {
                                 }
                             }));
                         }
-                        handles.into_iter().map(|h| h.join().unwrap()).collect()
+                        handles.into_iter().filter_map(|h| h.join().ok()).collect()
                     });
 
                     // ---- 端口连通性：并行探测 ----
@@ -106,7 +106,7 @@ impl NetworkView {
                                 },
                             }));
                         }
-                        handles.into_iter().map(|h| h.join().unwrap()).collect()
+                        handles.into_iter().filter_map(|h| h.join().ok()).collect()
                     });
 
                     // ---- DNS 解析：对每个站点取主机名解析 ----
@@ -196,7 +196,7 @@ impl NetworkView {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(div().size(px(6.0)).rounded_full().bg(if r.ok { rgb(0x4ade80) } else { theme.danger }))
+                            .child(div().size(px(6.0)).rounded_full().bg(if r.ok { theme.success } else { theme.danger }))
                             .child(
                                 div()
                                     .text_size(px(12.0))

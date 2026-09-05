@@ -87,9 +87,15 @@ fn collect_snapshot(sys: &mut sysinfo::System) -> SensorSnapshot {
         .first()
         .map(|c| c.brand().to_string())
         .unwrap_or_else(|| "Unknown CPU".into());
-    // 频率：sysinfo frequency()（MHz）
-    let clock_mhz = cpus.first().map(|c| c.frequency() as f32).unwrap_or(0.0);
-    let freq_source = if clock_mhz > 0.0 { "sysinfo" } else { "none" };
+    // 频率：cpu_freq 降级链（ntapi 实时 → pdh → registry 标称，审计 P2 接线），
+    // 全部失败回退 sysinfo frequency()
+    let (clock_mhz, freq_source) = match secm_datasource::cpu_freq::get_cpu_freq() {
+        (Some(mhz), src) => (mhz, src),
+        (None, _) => {
+            let mhz = cpus.first().map(|c| c.frequency() as f32).unwrap_or(0.0);
+            (mhz, if mhz > 0.0 { "sysinfo" } else { "none" })
+        }
+    };
 
     // LHM 温度/功耗注入（可用时）
     let (temperature, temp_source, power_w, power_source, power_estimated) =
@@ -190,7 +196,8 @@ fn collect_snapshot(sys: &mut sysinfo::System) -> SensorSnapshot {
         None => None,
     };
 
-    // ---- 磁盘（挂载点摘要）----
+    // ---- 磁盘（挂载点摘要 + PDH 卷读写速率，审计 P2 接线 disk_io）----
+    let io_map = secm_datasource::disk_io::get_disk_io_speed_map();
     let mut disks = Vec::new();
     for d in sysinfo::Disks::new_with_refreshed_list().list() {
         let total = d.total_space();
@@ -201,14 +208,23 @@ fn collect_snapshot(sys: &mut sysinfo::System) -> SensorSnapshot {
         } else {
             0.0
         };
+        // PDH 实例键为盘符 "C:" 形式，从挂载点提取首字母盘符匹配
+        let mount = d.mount_point().to_string_lossy();
+        let drive_key = mount
+            .chars()
+            .next()
+            .map(|c| format!("{}:", c.to_ascii_uppercase()));
+        let (read_mbps, write_mbps) = drive_key
+            .and_then(|k| io_map.get(&k).copied())
+            .unwrap_or((0.0, 0.0));
         disks.push(DiskData {
             name: d.name().to_string_lossy().to_string(),
             total_space: total,
             available_space: avail,
             used_space: used,
             usage_percent: pct,
-            read_mbps: 0.0, // P15 PDH 后续
-            write_mbps: 0.0,
+            read_mbps,
+            write_mbps,
         });
     }
 
@@ -236,6 +252,9 @@ fn collect_snapshot(sys: &mut sysinfo::System) -> SensorSnapshot {
 }
 
 /// LHM 低频 ensure（10s 节流：探测/启动开销不随 1s 轮询放大）
+///
+/// ensure_running 内部 wait_health 最长阻塞 ~10s（P1-4），故派发到独立线程执行，
+/// 不冻结 1s 采集线程；LAST 在派发时即推进，本次失败由下个 10s 窗口重试。
 fn ensure_lhm_periodic() {
     use std::sync::atomic::{AtomicU64, Ordering};
     static LAST: AtomicU64 = AtomicU64::new(0);
@@ -246,6 +265,9 @@ fn ensure_lhm_periodic() {
     let last = LAST.load(Ordering::Relaxed);
     if now.saturating_sub(last) >= 10 {
         LAST.store(now, Ordering::Relaxed);
-        crate::lhm::ensure_running();
+        // 派发失败（线程资源耗尽，极罕见）忽略：下个窗口重试
+        let _ = std::thread::Builder::new()
+            .name("lhm-ensure".into())
+            .spawn(crate::lhm::ensure_running);
     }
 }

@@ -16,7 +16,7 @@
 | UI | GPUI 0.2（Zed，Apache-2.0，Windows DirectX/blade 渲染） |
 | 语言 | Rust（edition 2021，workspace） |
 | 采集 | secm-datasource（Win32/注册表/HTTP 纯 Rust 采集） |
-| 温度/功耗 | LHM .NET sidecar（MPL-2.0 进程隔离）→ WinRing0 → ACPI |
+| 温度/功耗 | LHM .NET sidecar（MPL-2.0 进程隔离，45980 端口）；WinRing0/ACPI 降级链为后续版本计划 |
 | 系统托盘 | tray-icon（后台线程 + win32 消息泵） |
 
 ## 项目结构
@@ -27,7 +27,7 @@ sysenv-console-manager-gpui/
 │   ├── secm-datasource/   # 纯 Rust 采集层（注册表/服务/电源/网络/DNS/磁盘…）
 │   ├── secm-core/         # 业务逻辑（采集编排/系统操作，无 UI 依赖）
 │   └── secm-app/          # GPUI 桌面应用（UI + 装配 + main）
-├── sidecar-lhm/           # LHM 温度 sidecar（.NET 8 源码 + MPL-2.0/LGPL 许可）
+├── sidecar-lhm/           # LHM 温度 sidecar（.NET 8 源码 + MPL-2.0 许可，GPL-2.0 PawnIO 隔离边界）
 ├── third_party/           # 第三方驱动（WinRing0/PawnIO）源码与许可
 ├── scripts/publish.ps1    # 一键发布（Rust + sidecar + 许可 → dist/）
 ├── docs/adr/              # 架构决策记录（重构全案）

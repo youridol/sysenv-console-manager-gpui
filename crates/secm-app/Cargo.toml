@@ -8,11 +8,24 @@ license.workspace = true
 [dependencies]
 secm-core = { path = "../secm-core" }
 gpui.workspace = true
+anyhow = "1"
+serde_json = "1"
 tray-icon = "0.24"
-muda = "0.19"
 unicode-segmentation = "1"
+# 托盘图标解码（与 gpui 内部同版本；仅启用 png 解码面）
+image = { version = "0.25", default-features = false, features = ["png"] }
+# gpui Window → 原生 HWND 桥接（窗口图标挂接）
+raw-window-handle = "0.6"
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_System_Threading",
+    # GetModuleHandleW（窗口图标从 exe 资源加载）
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[build-dependencies]
+# exe 资源嵌入（icon.ico → Explorer/任务栏/标题栏图标来源）
+winresource = "0.1"
+

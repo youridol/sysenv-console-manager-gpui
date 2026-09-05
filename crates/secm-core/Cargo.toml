@@ -18,29 +18,14 @@ thiserror.workspace = true
 log.workspace = true
 ureq.workspace = true
 sysinfo = "0.30"
+# 仅保留实际使用的 Win32 面（历史列表整段拷贝自 datasource，含大量死 feature）
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
-    "Win32_System_Power",
-    "Win32_System_Registry",
-    "Win32_System_SystemInformation",
-    "Win32_System_Threading",
-    "Win32_System_Services",
-    "Win32_System_Memory",
-    "Win32_UI_Shell",
-    "Win32_NetworkManagement_IpHelper",
-    "Win32_NetworkManagement_Ndis",
-    "Win32_Networking_WinSock",
     "Win32_Security",
-    "Win32_Storage_FileSystem",
-    "Win32_Storage_IscsiDisc",
-    "Win32_Storage_Nvme",
-    "Win32_System_IO",
-    "Win32_System_Ioctl",
-    "Win32_System_Performance",
-    "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
 ] }
 parking_lot = "0.12"
 chrono = "0.4"
-winreg = "0.52"
+winreg.workspace = true

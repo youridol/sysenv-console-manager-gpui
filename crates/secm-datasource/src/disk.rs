@@ -472,7 +472,8 @@ fn read_disk_info(drive: &PhysicalDrive) -> Result<DiskInfo, CollectError> {
         match drive.query_property::<DEVICE_SEEK_PENALTY_DESCRIPTOR>(StorageDeviceSeekPenaltyProperty)
         {
             Ok(d) => {
-                if d.IncursSeekPenalty != 0 {
+                // windows-sys 0.61 起 IncursSeekPenalty 为 bool
+                if d.IncursSeekPenalty {
                     "HDD".to_string()
                 } else {
                     "SSD".to_string()

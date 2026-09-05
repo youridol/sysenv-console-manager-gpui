@@ -596,12 +596,21 @@ pub fn check_ai_tools() -> AiToolsInfo {
     let mut tools: Vec<AiTool> = Vec::with_capacity(AI_TOOLS.len());
 
     // 为每个工具启动独立线程并行检测
+    // P1-15：线程体内 catch_unwind 隔离 panic（thread::scope 结束会重抛子线程
+    // panic，仅靠 join 判 Err 不够），单工具检测异常不拖垮整体
     std::thread::scope(|s| {
         let handles: Vec<_> = AI_TOOLS
             .iter()
             .map(|(cmd, display_name, npm_pkg)| {
                 s.spawn(move || {
-                    let (installed, version, path) = detect_cli_tool(cmd, npm_pkg);
+                    let detected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        detect_cli_tool(cmd, npm_pkg)
+                    }))
+                    .unwrap_or_else(|_| {
+                        log::warn!("environment: 工具 {} 检测线程 panic，降级为未安装", cmd);
+                        (false, String::new(), String::new())
+                    });
+                    let (installed, version, path) = detected;
                     AiTool {
                         name: cmd.to_string(),
                         display_name: display_name.to_string(),
@@ -617,7 +626,9 @@ pub fn check_ai_tools() -> AiToolsInfo {
             .collect();
 
         for h in handles {
-            tools.push(h.join().unwrap());
+            if let Ok(t) = h.join() {
+                tools.push(t);
+            }
         }
     });
 
@@ -658,16 +669,24 @@ pub fn fetch_ai_latest_versions() -> Vec<(String, String)> {
                 let cmd = cmd.clone();
                 let pkg = pkg.clone();
                 s.spawn(move || {
-                    let latest = fetch_npm_latest(&pkg);
+                    // P1-15：线程体 panic 隔离，降级为空结果
+                    let latest = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        fetch_npm_latest(&pkg)
+                    }))
+                    .unwrap_or_else(|_| {
+                        log::warn!("environment: 工具 {} npm 版本查询线程 panic", cmd);
+                        String::new()
+                    });
                     (cmd, latest)
                 })
             })
             .collect();
 
         for h in handles {
-            let (cmd, ver) = h.join().unwrap();
-            if !ver.is_empty() {
-                results.push((cmd, ver));
+            if let Ok((cmd, ver)) = h.join() {
+                if !ver.is_empty() {
+                    results.push((cmd, ver));
+                }
             }
         }
     });
@@ -753,7 +772,8 @@ pub fn install_or_upgrade_tool(npm_pkg: &str) -> Result<String, String> {
     // cmd /c 后跟完整命令字符串（单参数），确保 npm.cmd 被正确调用
     // 注：包名已经白名单 + 格式双重校验，拼接安全
     let cmdline = format!("npm install -g {}", npm_pkg);
-    let output = run_command_silent("cmd", &["/c", &cmdline]);
+    // 安装属长任务：5 分钟上限（npm 拉包慢），超时杀树不再永久悬挂（P1-10）
+    let output = run_command_silent_to("cmd", &["/c", &cmdline], std::time::Duration::from_secs(300));
 
     match output {
         Some(out) if out.status.success() => {
@@ -893,7 +913,8 @@ pub fn uninstall_ai_tool(npm_pkg: &str) -> Result<String, String> {
         return Err("非法 npm 包名".into());
     }
     let cmdline = format!("npm uninstall -g {}", npm_pkg);
-    let output = run_command_silent("cmd", &["/c", &cmdline]);
+    // 卸载属长任务：2 分钟上限（P1-10）
+    let output = run_command_silent_to("cmd", &["/c", &cmdline], std::time::Duration::from_secs(120));
     match output {
         Some(out) if out.status.success() => {
             let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -985,7 +1006,8 @@ pub fn install_mcp_server(pkg: &str) -> Result<String, String> {
         return Err("非法 npm 包名".into());
     }
     let cmdline = format!("npm install -g {}", pkg);
-    let output = run_command_silent("cmd", &["/c", &cmdline]);
+    // MCP 安装属长任务：5 分钟上限（P1-10）
+    let output = run_command_silent_to("cmd", &["/c", &cmdline], std::time::Duration::from_secs(300));
     match output {
         Some(out) if out.status.success() => {
             let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -1019,7 +1041,8 @@ pub fn uninstall_mcp_server(pkg: &str) -> Result<String, String> {
         return Err(format!("不支持的 MCP 服务器: {}", pkg));
     }
     let cmdline = format!("npm uninstall -g {}", pkg);
-    let output = run_command_silent("cmd", &["/c", &cmdline]);
+    // MCP 卸载属长任务：2 分钟上限（P1-10）
+    let output = run_command_silent_to("cmd", &["/c", &cmdline], std::time::Duration::from_secs(120));
     match output {
         Some(out) if out.status.success() => {
             Ok(format!("{} 卸载成功", pkg))
@@ -1173,18 +1196,27 @@ fn suppress_windows_error_dialogs() {
     }
 }
 
-/// 执行外部命令（自动抑制 Windows 错误弹窗 + 隐藏控制台窗口）
+/// 执行外部命令（自动抑制 Windows 错误弹窗 + 隐藏控制台窗口 + 超时保护）
+///
+/// 默认超时 15s（P1-10）：npm registry 挂死/代理不可达时不再永久悬挂后台任务；
+/// 安装/卸载等长任务用 [`run_command_silent_to`] 指定更长超时。
 fn run_command_silent(cmd: &str, args: &[&str]) -> Option<std::process::Output> {
+    run_command_silent_to(cmd, args, std::time::Duration::from_secs(15))
+}
+
+/// 指定超时的外部命令执行（超时杀整棵进程树，详见 proc_util::run_command_with_timeout）
+fn run_command_silent_to(
+    cmd: &str,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> Option<std::process::Output> {
     suppress_windows_error_dialogs();
-    let mut command = std::process::Command::new(cmd);
-    command.args(args);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    command.output().ok()
+    let out = crate::proc_util::run_command_with_timeout(cmd, args, timeout)?;
+    Some(std::process::Output {
+        status: crate::proc_util::exit_status(if out.success { 0 } else { 1 }),
+        stdout: out.stdout,
+        stderr: out.stderr,
+    })
 }
 
 /// 尝试多个版本标志获取版本号，并清理输出

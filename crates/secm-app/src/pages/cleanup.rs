@@ -3,10 +3,11 @@
 // 清理为文件 IO，放后台线程执行避免卡 UI。
 
 use gpui::prelude::*;
-use gpui::{div, px, rgb, SharedString, Window, Context, Render, WeakEntity};
+use gpui::{div, px, rgb, Entity, SharedString, Window, Context, Render, WeakEntity};
 use secm_core::cleanup::{self, CleanupResult, ProcessInfo};
 
 use crate::theme::Theme;
+use crate::ui::text_input::{ChangeText, TextField};
 
 /// 清理操作类型（按钮 → 后台执行函数映射）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,10 +59,27 @@ pub struct CleanupView {
     loading_procs: bool,
     /// 搜索关键词
     keyword: SharedString,
+    /// 进程搜索输入框（P2：keyword 历史无写入源，过滤从未接线）
+    search_input: Entity<TextField>,
+}
+
+/// 快捷操作语义（P2：历史 op_button 靠 label.contains("DNS") 字符串嗅探分发）
+#[derive(Clone, Copy)]
+enum QuickOp {
+    FlushDns,
+    RefreshProcs,
 }
 
 impl CleanupView {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        let search_input = cx.new(|cx| TextField::new("", "搜索进程名 / PID", cx));
+        cx.subscribe(
+            &search_input,
+            |this, field: Entity<TextField>, _ev: &ChangeText, cx| {
+                this.set_keyword(field.read(cx).value(), cx);
+            },
+        )
+        .detach();
         let mut v = Self {
             procs: Vec::new(),
             last_result: None,
@@ -69,9 +87,16 @@ impl CleanupView {
             cleaning: false,
             loading_procs: false,
             keyword: SharedString::from(""),
+            search_input,
         };
         v.refresh_procs(cx);
         v
+    }
+
+    /// 进程搜索关键词更新（由搜索输入框 ChangeText 订阅驱动）
+    fn set_keyword(&mut self, kw: SharedString, cx: &mut Context<Self>) {
+        self.keyword = kw;
+        cx.notify();
     }
 
     /// 后台枚举进程（Top 200，快照耗时；结果回填）
@@ -247,8 +272,13 @@ impl Render for CleanupView {
                         div()
                             .flex()
                             .gap_2()
-                            .child(self.op_button(&theme, "刷新 DNS 缓存", false, cx))
-                            .child(self.op_button(&theme, "刷新进程列表", false, cx)),
+                            .child(self.op_button(&theme, "刷新 DNS 缓存", QuickOp::FlushDns, cx))
+                            .child(self.op_button(&theme, "刷新进程列表", QuickOp::RefreshProcs, cx))
+                            .child(
+                                div()
+                                    .w(px(220.0))
+                                    .child(self.search_input.clone()),
+                            ),
                     ),
             )
             // 进程表
@@ -393,9 +423,14 @@ impl CleanupView {
             })
     }
 
-    fn op_button(&self, theme: &Theme, label: &str, _danger: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    fn op_button(
+        &self,
+        theme: &Theme,
+        label: &str,
+        op: QuickOp,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let label_owned = label.to_string();
-        let is_dns = label_owned.contains("DNS");
         div()
             .id(SharedString::from(label_owned.clone()))
             .px_4()
@@ -406,12 +441,9 @@ impl CleanupView {
             .hover(|s| s.bg(rgb(0x3d66e6)))
             .text_color(rgb(0xffffff))
             .text_size(px(12.5))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if is_dns {
-                    this.flush_dns(cx);
-                } else {
-                    this.refresh_procs(cx);
-                }
+            .on_click(cx.listener(move |this, _, _, cx| match op {
+                QuickOp::FlushDns => this.flush_dns(cx),
+                QuickOp::RefreshProcs => this.refresh_procs(cx),
             }))
             .child(label_owned)
     }

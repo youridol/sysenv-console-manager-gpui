@@ -4,6 +4,8 @@
 use gpui::{div, px, rgb, Window, Context, Render, Timer, SharedString};
 use gpui::prelude::*;
 use secm_core::logger::{LogBuffer, LogEntry};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::theme::Theme;
@@ -14,25 +16,33 @@ pub struct LogsView {
     filter_level: SharedString,
     /// 关键词
     keyword: SharedString,
+    /// 页面可见性门控（P1-12）：仅当前页激活时拉取日志并 notify
+    active: Arc<AtomicBool>,
 }
 
 impl LogsView {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(active: Arc<AtomicBool>, cx: &mut Context<Self>) -> Self {
         LogBuffer::global().append("Info", "logs", "日志页已就绪");
         let mut v = Self {
             entries: Vec::new(),
             filter_level: SharedString::from(""),
             keyword: SharedString::from(""),
+            active,
         };
         v.schedule_refresh(cx);
         v
     }
 
     fn schedule_refresh(&mut self, cx: &mut Context<Self>) {
+        let active = self.active.clone();
         cx.spawn(
             async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
                 loop {
                     Timer::after(Duration::from_millis(500)).await;
+                    // 不可见时仅睡眠轮询，不 clone 200 条不 notify（P1-12）
+                    if !active.load(Ordering::Relaxed) {
+                        continue;
+                    }
                     let all = LogBuffer::global().get_all();
                     if let Some(view) = this.upgrade() {
                         view.update(cx, |view, cx| {

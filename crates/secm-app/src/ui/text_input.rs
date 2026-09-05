@@ -412,7 +412,11 @@ impl EntityInputHandler for TextField {
     ) -> Option<usize> {
         let line_point = self.last_bounds?.localize(&point)?;
         let last_layout = self.last_layout.as_ref()?;
-        assert_eq!(last_layout.text, self.content);
+        // P1-13：历史 assert_eq! 在 IME 组合中 content 变更而 layout 未重建时
+        // 会 panic（UI 线程崩溃）。布局过期时本帧放弃索引映射，返回 None 即可。
+        if last_layout.text != self.content {
+            return None;
+        }
         let utf8_index = last_layout.index_for_x(point.x - line_point.x)?;
         Some(self.offset_to_utf16(utf8_index))
     }
@@ -580,9 +584,13 @@ impl Element for TextFieldElement {
         if let Some(selection) = prepaint.selection.take() {
             window.paint_quad(selection);
         }
-        let line = prepaint.line.take().unwrap();
-        line.paint(bounds.origin, window.line_height(), window, cx)
-            .unwrap();
+        // P1-13：prepaint 未产出 line / 绘制失败时优雅跳过，不在 UI 线程 panic
+        let Some(line) = prepaint.line.take() else {
+            return;
+        };
+        if line.paint(bounds.origin, window.line_height(), window, cx).is_err() {
+            return;
+        }
 
         if focus_handle.is_focused(window) {
             if let Some(cursor) = prepaint.cursor.take() {

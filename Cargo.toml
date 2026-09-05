@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2.0.0"
+version = "2.2.0"
 edition = "2021"
 license = "MIT"
 authors = ["SECM Team"]
@@ -21,8 +21,8 @@ serde_json = "1"
 thiserror = "2"
 log = "0.4"
 ureq = "2"
-winreg = "0.52"
-windows-sys = "0.59"
+winreg = "0.56"
+windows-sys = "0.61"
 
 [profile.dev]
 opt-level = 0

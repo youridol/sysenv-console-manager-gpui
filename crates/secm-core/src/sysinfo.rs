@@ -46,7 +46,7 @@ pub struct SystemInfo {
     pub boot_mode: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct ActivationInfo {
     /// 原始激活状态 (Licensed / Unlicensed / Notification / Grace / Unknown)
     pub status_raw: String,
@@ -54,7 +54,7 @@ pub struct ActivationInfo {
     pub label: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct PatchInfo {
     /// KB 编号，如 "KB5039212"
     pub kb: String,
@@ -72,26 +72,58 @@ pub struct PatchInfo {
 
 /// 采集全部系统信息（多线程并行采集，各字段独立执行；单字段失败返回 "无法获取"）
 pub fn get_system_info() -> SystemInfo {
+    // P1-15：单字段线程 panic（如 PS 解析越界）不再放大为整页检测失败/任务悬挂——
+    // thread::scope 会在作用域结束处重抛任何子线程 panic，故在线程体内 catch_unwind 隔离
     std::thread::scope(|s| {
-        let edition = s.spawn(|| get_edition());
-        let build_number = s.spawn(|| get_build_number());
-        let ubr = s.spawn(|| get_ubr());
-        let arch = s.spawn(|| get_arch());
-        let install_date = s.spawn(|| get_install_date());
-        let activation = s.spawn(|| get_activation());
-        let latest_patch = s.spawn(|| get_latest_patch());
-        let boot_mode = s.spawn(|| get_boot_mode());
+        let edition = s.spawn(|| safe_call("edition", get_edition, "无法获取".to_string()));
+        let build_number =
+            s.spawn(|| safe_call("build_number", get_build_number, "无法获取".to_string()));
+        let ubr = s.spawn(|| safe_call("ubr", get_ubr, "无法获取".to_string()));
+        let arch = s.spawn(|| safe_call("arch", get_arch, "无法获取".to_string()));
+        let install_date =
+            s.spawn(|| safe_call("install_date", get_install_date, "无法获取".to_string()));
+        let activation = s.spawn(|| {
+            safe_call(
+                "activation",
+                get_activation,
+                ActivationInfo {
+                    status_raw: "Unknown".into(),
+                    label: "无法获取".into(),
+                },
+            )
+        });
+        let latest_patch = s.spawn(|| {
+            safe_call(
+                "latest_patch",
+                get_latest_patch,
+                PatchInfo {
+                    kb: "无法获取".into(),
+                    date: String::new(),
+                    title_raw: String::new(),
+                    title_cn: "无法获取".into(),
+                },
+            )
+        });
+        let boot_mode = s.spawn(|| safe_call("boot_mode", get_boot_mode, "未知".to_string()));
 
         SystemInfo {
-            edition: edition.join().unwrap(),
-            build_number: build_number.join().unwrap(),
-            ubr: ubr.join().unwrap(),
-            arch: arch.join().unwrap(),
-            install_date: install_date.join().unwrap(),
-            activation: activation.join().unwrap(),
-            latest_patch: latest_patch.join().unwrap(),
-            boot_mode: boot_mode.join().unwrap(),
+            edition: edition.join().unwrap_or_default(),
+            build_number: build_number.join().unwrap_or_default(),
+            ubr: ubr.join().unwrap_or_default(),
+            arch: arch.join().unwrap_or_default(),
+            install_date: install_date.join().unwrap_or_default(),
+            activation: activation.join().unwrap_or_default(),
+            latest_patch: latest_patch.join().unwrap_or_default(),
+            boot_mode: boot_mode.join().unwrap_or_default(),
         }
+    })
+}
+
+/// 隔离单字段采集的 panic（返回字段级降级值），并记录日志
+fn safe_call<T>(what: &str, f: impl FnOnce() -> T + std::panic::UnwindSafe, fallback: T) -> T {
+    std::panic::catch_unwind(f).unwrap_or_else(|_| {
+        log::warn!("sysinfo: {} 采集线程 panic，降级为无法获取", what);
+        fallback
     })
 }
 
@@ -430,51 +462,10 @@ fn get_latest_patch() -> PatchInfo {
     }
 }
 
-/// 将 M/D/YYYY 格式归一化为 YYYY-MM-DD
-fn normalize_date(raw: &str) -> String {
-    let parts: Vec<&str> = raw.split('/').collect();
-    if parts.len() == 3 {
-        if let (Ok(m), Ok(d), Ok(y)) = (
-            parts[0].parse::<u32>(),
-            parts[1].parse::<u32>(),
-            parts[2].parse::<u32>(),
-        ) {
-            return format!("{:04}-{:02}-{:02}", y, m, d);
-        }
-    }
-    // 若已是 YYYY-MM-DD 格式则原样返回
-    if raw.len() == 10 && raw.chars().nth(4) == Some('-') {
-        return raw.to_string();
-    }
-    raw.to_string()
-}
-
-/// 补丁标题英文 → 中文翻译
-fn translate_patch_title(title: &str) -> String {
-    let lower = title.to_lowercase();
-    if lower.contains("security") && lower.contains("cumulative") {
-        "累积安全更新".into()
-    } else if lower.contains("security") && lower.contains("quality") {
-        "质量安全更新".into()
-    } else if lower.contains("security") || lower.contains("security update") {
-        "安全更新".into()
-    } else if lower.contains("cumulative update") {
-        "累积更新".into()
-    } else if lower.contains("update rollup") {
-        "更新汇总".into()
-    } else if lower.contains("service pack") {
-        "服务包".into()
-    } else if lower.contains("hotfix") {
-        "热修复".into()
-    } else if lower.contains("update") {
-        "更新".into()
-    } else if lower.contains("preview") {
-        "预览更新".into()
-    } else {
-        // 无法匹配则返回原标题
-        title.to_string()
-    }
-}
+// 日期归一化与补丁标题翻译收敛到 datasource::registry 单一实现
+// （历史为两份漂移副本：datasource 版兼容 年/月/日 与 月/日/年 + 时间后缀，
+// core 版只认 M/D/Y——展示格式曾跨链路不一致，审计 P2 收敛）
+use secm_datasource::registry::{normalize_date, translate_patch_title};
 
 // ============================================================================
 // 8. 启动模式 (UEFI / BIOS)
