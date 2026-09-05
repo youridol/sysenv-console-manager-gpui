@@ -49,12 +49,16 @@ pub struct TextField {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
-    #[allow(dead_code)]
-    _marker: (),
+    /// 实例标识（render 时元素 id 唯一）
+    instance_id: SharedString,
 }
 
 impl TextField {
-    pub fn new(content: impl Into<SharedString>, placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        content: impl Into<SharedString>,
+        placeholder: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
             content: content.into(),
@@ -65,13 +69,23 @@ impl TextField {
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
-            _marker: (),
+            instance_id: SharedString::from(format!("text-field-{:?}", cx.entity_id())),
         }
     }
 
     /// 读取当前值
     pub fn value(&self) -> SharedString {
         self.content.clone()
+    }
+
+    /// 程序化设置内容（光标移至末尾；不触发 ChangeText 事件，避免循环）
+    pub fn set_value(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.content = text.into();
+        let len = self.content.len();
+        self.selected_range = len..len;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        cx.notify();
     }
 
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
@@ -585,8 +599,9 @@ impl Element for TextFieldElement {
 
 impl Render for TextField {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let instance_id = self.instance_id.clone();
         div()
-            .id("text-field-inner")
+            .id(instance_id)
             .flex()
             .key_context("TextField")
             .track_focus(&self.focus_handle(cx))

@@ -12,6 +12,9 @@ use gpui::{
 
 fn main() {
     Application::new().run(|cx: &mut App| {
+        // 文本输入控件按键绑定（TextField keymap 上下文）
+        crate::ui::text_input::bind_text_field_keys(cx);
+
         let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
         let _ = cx.open_window(
             WindowOptions {

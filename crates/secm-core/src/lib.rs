@@ -8,6 +8,7 @@ pub mod hardware;
 pub mod lhm;
 pub mod logger;
 pub mod net_config;
+pub mod netif;
 pub mod network;
 pub mod proc_util;
 pub mod sensor;
