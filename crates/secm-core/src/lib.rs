@@ -3,6 +3,7 @@
 // 阶段进度：v2.0.0 骨架 → Phase 1 起逐模块迁入。
 
 pub mod cleanup;
+pub mod environment;
 pub mod error;
 pub mod hardware;
 pub mod lhm;

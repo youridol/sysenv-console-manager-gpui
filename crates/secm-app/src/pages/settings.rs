@@ -1,10 +1,10 @@
 // secm-app::pages::settings — 系统设置页
-// Phase 2：开关组（HAGS/游戏模式…）+ 电源计划列表。状态从 secm-core::settings 读取，
-// 操作后回读刷新；GPUI 交互经 Context::listener + notify。
+// 开关组（HAGS/游戏模式/窗口化优化/VRR/鼠标精准度）+ 电源计划列表 + 异类调度策略 + 卓越性能导入。
+// 状态从 secm-core::settings 读取，操作后回读刷新。
 
 use gpui::{div, px, rgb, SharedString, Window, Context, Render};
 use gpui::prelude::*;
-use secm_core::settings::{self, PowerPlan, SettingState};
+use secm_core::settings::{self, HeteroPolicies, PowerPlan, SettingState};
 
 use crate::theme::Theme;
 
@@ -13,53 +13,104 @@ use crate::theme::Theme;
 enum ToggleKind {
     Hags,
     GameMode,
+    GameOptimization,
+    Vrr,
+    MousePrecision,
 }
 
+impl ToggleKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Hags => "GPU 硬件加速调度 (HAGS)",
+            Self::GameMode => "游戏模式",
+            Self::GameOptimization => "窗口化游戏优化",
+            Self::Vrr => "可变刷新率 (VRR)",
+            Self::MousePrecision => "鼠标精准度（增强指针精确度）",
+        }
+    }
+
+    /// 开关开启方向（鼠标精准度开启 = 启用增强精确度；其余为"优化开启"）
+    fn get(self) -> SettingState {
+        match self {
+            Self::Hags => settings::get_hags_state(),
+            Self::GameMode => settings::get_game_mode_state(),
+            Self::GameOptimization => settings::get_game_optimization_state(),
+            Self::Vrr => settings::get_vrr_state(),
+            Self::MousePrecision => settings::get_mouse_precision_state(),
+        }
+    }
+
+    fn set(self, enabled: bool) -> Result<SettingState, String> {
+        match self {
+            Self::Hags => settings::set_hags_state(enabled),
+            Self::GameMode => settings::set_game_mode_state(enabled),
+            Self::GameOptimization => settings::set_game_optimization(enabled),
+            Self::Vrr => settings::set_vrr_state(enabled),
+            Self::MousePrecision => settings::set_mouse_precision(enabled),
+        }
+    }
+}
+
+/// 异类调度策略取值（0-5 → 中文标签）
+const HETERO_CHOICES: &[(u32, &str)] = &[
+    (0, "所有处理器"),
+    (1, "高性能处理器"),
+    (2, "首选高性能处理器"),
+    (3, "高效处理器"),
+    (4, "首选高效处理器"),
+    (5, "自动"),
+];
+
 pub struct SettingsView {
-    /// 开关状态（HAGS/游戏模式…，加载后填充）
+    /// 开关状态列表
     toggles: Vec<(ToggleKind, SettingState)>,
     /// 电源计划列表
     plans: Vec<PowerPlan>,
+    /// 异类调度策略（无/不支持时 None）
+    hetero: Option<HeteroPolicies>,
     /// 状态消息（操作反馈）
     status: SharedString,
+    /// 卓越性能导入反馈
+    ultimate_msg: SharedString,
 }
 
 impl SettingsView {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let mut v = Self {
-            toggles: vec![
-                (ToggleKind::Hags, settings::get_hags_state()),
-                (ToggleKind::GameMode, settings::get_game_mode_state()),
-            ],
+            toggles: Self::load_toggles(),
             plans: settings::get_power_plans().unwrap_or_default(),
+            hetero: settings::get_hetero_policies().ok(),
             status: SharedString::from(""),
+            ultimate_msg: SharedString::from(""),
         };
         v.refresh(cx);
         v
     }
 
+    fn load_toggles() -> Vec<(ToggleKind, SettingState)> {
+        [
+            ToggleKind::Hags,
+            ToggleKind::GameMode,
+            ToggleKind::GameOptimization,
+            ToggleKind::Vrr,
+            ToggleKind::MousePrecision,
+        ]
+        .into_iter()
+        .map(|k| (k, k.get()))
+        .collect()
+    }
+
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.toggles = vec![
-            (ToggleKind::Hags, settings::get_hags_state()),
-            (ToggleKind::GameMode, settings::get_game_mode_state()),
-        ];
+        self.toggles = Self::load_toggles();
         self.plans = settings::get_power_plans().unwrap_or_default();
+        self.hetero = settings::get_hetero_policies().ok();
         cx.notify();
     }
 
     /// 切换开关（读当前状态 → 反相 → set → 回读）
     fn toggle(&mut self, kind: ToggleKind, cx: &mut Context<Self>) {
-        let result = match kind {
-            ToggleKind::Hags => {
-                let cur = settings::get_hags_state();
-                settings::set_hags_state(!cur.enabled)
-            }
-            ToggleKind::GameMode => {
-                let cur = settings::get_game_mode_state();
-                settings::set_game_mode_state(!cur.enabled)
-            }
-        };
-        match result {
+        let cur = kind.get();
+        match kind.set(!cur.enabled) {
             Ok(s) => self.status = SharedString::from(s.message.clone()),
             Err(e) => self.status = SharedString::from(format!("操作失败: {}", e)),
         }
@@ -75,11 +126,38 @@ impl SettingsView {
         self.refresh(cx);
     }
 
-    fn kind_label(kind: ToggleKind) -> &'static str {
-        match kind {
-            ToggleKind::Hags => "GPU 硬件加速调度 (HAGS)",
-            ToggleKind::GameMode => "游戏模式",
+    /// 设置异类调度策略（kind=thread/short；AC/DC 同步写）
+    fn set_hetero(&mut self, kind: &str, value: u32, cx: &mut Context<Self>) {
+        let kind_label = if kind == "short" {
+            "短运行线程调度策略"
+        } else {
+            "线程调度策略"
+        };
+        match settings::set_hetero_policy(kind, value) {
+            Ok(()) => self.status = SharedString::from(format!("{}已设为「{}」", kind_label, Self::hetero_label(value))),
+            Err(e) => self.status = SharedString::from(format!("设置失败: {}", e)),
         }
+        self.refresh(cx);
+    }
+
+    /// 导入并激活卓越性能电源计划
+    fn import_ultimate(&mut self, cx: &mut Context<Self>) {
+        match settings::enable_ultimate_performance() {
+            Ok(msg) => {
+                self.ultimate_msg = SharedString::from(msg);
+                self.status = SharedString::from("卓越性能电源计划已导入并激活");
+            }
+            Err(e) => self.status = SharedString::from(format!("导入失败: {}", e)),
+        }
+        self.refresh(cx);
+    }
+
+    fn hetero_label(value: u32) -> &'static str {
+        HETERO_CHOICES
+            .iter()
+            .find(|(v, _)| *v == value)
+            .map(|(_, l)| *l)
+            .unwrap_or("自动")
     }
 }
 
@@ -115,7 +193,7 @@ impl Render for SettingsView {
                                 div()
                                     .text_size(px(12.0))
                                     .text_color(theme.text_muted)
-                                    .child("Phase 2 · 部分功能"),
+                                    .child("系统优化开关 · 电源计划 · 异类调度策略"),
                             ),
                     ),
             )
@@ -135,7 +213,7 @@ impl Render for SettingsView {
                                 let k = *kind;
                                 let enabled = state.enabled;
                                 let msg = state.message.clone();
-                                let label = Self::kind_label(k).to_string();
+                                let label = k.label().to_string();
                                 div()
                                     .flex()
                                     .items_center()
@@ -189,12 +267,49 @@ impl Render for SettingsView {
                     .bg(theme.panel)
                     .child(
                         div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
                             .px_5()
                             .py_3()
-                            .text_size(px(14.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child("电源计划"),
+                            .child(
+                                div()
+                                    .text_size(px(14.0))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child("电源计划"),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .id("import-ultimate")
+                                            .px_3()
+                                            .py_1()
+                                            .rounded_md()
+                                            .cursor_pointer()
+                                            .bg(theme.panel_hover)
+                                            .hover(|s| s.bg(theme.border))
+                                            .text_color(theme.text)
+                                            .text_size(px(11.5))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.import_ultimate(cx);
+                                            }))
+                                            .child("导入卓越性能计划"),
+                                    )
+                                    .when(!self.ultimate_msg.is_empty(), |s| {
+                                        let m = self.ultimate_msg.clone();
+                                        s.child(
+                                            div()
+                                                .text_size(px(10.5))
+                                                .text_color(theme.text_muted)
+                                                .child(m),
+                                        )
+                                    }),
+                            ),
                     )
                     .children(self.plans.iter().map(|p| {
                         let guid = p.guid.clone();
@@ -255,7 +370,114 @@ impl Render for SettingsView {
                             )
                     })),
             )
+            // 异类调度策略（仅混合架构 CPU 支持时显示）
+            .when_some(self.hetero.as_ref(), |s, h| {
+                let supported = h.supported;
+                let thread_ac = h.thread_ac;
+                let short_ac = h.short_ac;
+                s.child(
+                    div()
+                        .flex_col()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.panel)
+                        .child(
+                            div()
+                                .px_5()
+                                .py_3()
+                                .text_size(px(14.0))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child("异类线程调度策略"),
+                        )
+                        .when(!supported, |s| {
+                            s.child(
+                                div()
+                                    .px_5()
+                                    .py_3()
+                                    .text_size(px(12.0))
+                                    .text_color(theme.text_muted)
+                                    .child("当前 CPU 不支持（非混合架构）"),
+                            )
+                        })
+                        .when(supported, |s| {
+                            s.child(hetero_section_row(
+                                &theme,
+                                "线程调度策略",
+                                thread_ac,
+                                "thread",
+                                cx,
+                            ))
+                            .child(hetero_section_row(
+                                &theme,
+                                "短运行线程调度策略",
+                                short_ac,
+                                "short",
+                                cx,
+                            ))
+                        }),
+                )
+            })
     }
+}
+
+/// 异类策略选择行（6 档按钮组，当前值高亮）
+fn hetero_section_row(
+    theme: &Theme,
+    title: &str,
+    current: Option<u32>,
+    kind: &'static str,
+    cx: &mut Context<SettingsView>,
+) -> impl IntoElement {
+    let title = title.to_string();
+    div()
+        .flex_col()
+        .gap_2()
+        .px_5()
+        .py_3()
+        .border_t_1()
+        .border_color(theme.border)
+        .child(
+            div()
+                .text_size(px(12.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.text)
+                .child(title),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_1p5()
+                .children(HETERO_CHOICES.iter().map(|(v, label)| {
+                    let value = *v;
+                    let is_cur = current == Some(value);
+                    let label_owned = label.to_string();
+                    let kind_c = kind;
+                    div()
+                        .id(SharedString::from(format!("hetero-{}-{}", kind_c, value)))
+                        .px_2p5()
+                        .py_1()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .when(is_cur, |s| {
+                            s.bg(theme.brand).text_color(rgb(0xffffff))
+                        })
+                        .when(!is_cur, |s| {
+                            s.bg(theme.panel_hover)
+                                .hover(|s| s.bg(theme.border))
+                                .text_color(theme.text)
+                        })
+                        .text_size(px(11.5))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if !is_cur {
+                                this.set_hetero(kind_c, value, cx);
+                            }
+                        }))
+                        .child(label_owned)
+                })),
+        )
 }
 
 impl SettingsView {
@@ -267,12 +489,15 @@ impl SettingsView {
         enabled: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let id = match kind {
+            ToggleKind::Hags => "toggle-hags",
+            ToggleKind::GameMode => "toggle-gamemode",
+            ToggleKind::GameOptimization => "toggle-gameopt",
+            ToggleKind::Vrr => "toggle-vrr",
+            ToggleKind::MousePrecision => "toggle-mouseprec",
+        };
         div()
-            .id(if kind == ToggleKind::Hags {
-                "toggle-hags"
-            } else {
-                "toggle-gamemode"
-            })
+            .id(id)
             .w(px(44.0))
             .h(px(24.0))
             .rounded_full()
