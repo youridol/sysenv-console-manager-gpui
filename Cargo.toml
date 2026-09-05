@@ -23,3 +23,7 @@ log = "0.4"
 ureq = "2"
 winreg = "0.52"
 windows-sys = "0.59"
+
+[profile.dev]
+opt-level = 0
+incremental = true

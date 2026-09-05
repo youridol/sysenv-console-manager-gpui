@@ -42,6 +42,3 @@ wmi = "0.18"
 
 [dev-dependencies]
 env_logger = "0.11"
-
-[profile.dev]
-opt-level = 0
