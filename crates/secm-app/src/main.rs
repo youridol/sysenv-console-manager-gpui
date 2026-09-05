@@ -3,10 +3,11 @@
 mod app;
 mod pages;
 mod theme;
+mod tray;
 mod ui;
 
 use gpui::{
-    App, Application, AppContext, Bounds, WindowOptions, WindowBounds, size, px,
+    App, Application, AppContext, AsyncApp, Bounds, WindowOptions, WindowBounds, size, px,
 };
 
 fn main() {
@@ -19,5 +20,27 @@ fn main() {
             },
             |_window, cx| cx.new(app::AppRoot::new),
         );
+
+        // 系统托盘：后台线程 + 动作通道；主线程消费（显示窗口 / 退出）
+        let tray_rx = tray::spawn_tray();
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            loop {
+                match tray_rx.recv() {
+                    Ok(tray::TrayAction::ShowWindow) => {
+                        let _ = cx.update(|app| {
+                            app.activate(false);
+                        });
+                    }
+                    Ok(tray::TrayAction::Quit) => {
+                        let _ = cx.update(|app| {
+                            app.quit();
+                        });
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+        })
+        .detach();
     });
 }
