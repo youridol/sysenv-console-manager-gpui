@@ -258,3 +258,51 @@ pub fn set_power_plan(guid: &str) -> Result<(), String> {
 pub fn delete_power_plan(guid: &str) -> Result<(), String> {
     power::delete_scheme(guid).map_err(|e| format!("删除电源计划失败: {}", e))
 }
+
+// ============================================================================
+// Windows 服务管理（枚举/启停/启动类型；对齐源 settings.rs 服务面）
+// ============================================================================
+
+pub use secm_datasource::service::ServiceInfo;
+
+/// 枚举全部服务
+pub fn list_all_services() -> Result<Vec<ServiceInfo>, String> {
+    secm_datasource::service::enum_services()
+        .map_err(|e| format!("枚举服务失败: {}", e))
+}
+
+/// 启动服务（需管理员；幂等）
+pub fn start_service(name: &str) -> Result<String, String> {
+    if !is_admin() {
+        return Err("启动服务需要管理员权限。请以管理员身份运行 SECM。".to_string());
+    }
+    secm_datasource::service::start_service(name)
+        .map_err(|e| format!("启动服务 '{}' 失败: {}", name, e))?;
+    Ok(format!("服务 '{}' 已启动", name))
+}
+
+/// 停止服务（需管理员；幂等）
+pub fn stop_service(name: &str) -> Result<String, String> {
+    if !is_admin() {
+        return Err("停止服务需要管理员权限。请以管理员身份运行 SECM。".to_string());
+    }
+    secm_datasource::service::stop_service(name)
+        .map_err(|e| format!("停止服务 '{}' 失败: {}", name, e))?;
+    Ok(format!("服务 '{}' 已停止", name))
+}
+
+/// 设置服务启动类型（自动/手动/禁用；需管理员）
+pub fn set_service_start_type(name: &str, start_type: &str) -> Result<String, String> {
+    if !is_admin() {
+        return Err("修改服务启动类型需要管理员权限。请以管理员身份运行 SECM。".to_string());
+    }
+    let normalized = match start_type {
+        "自动" | "auto" | "Auto" => "auto",
+        "手动" | "manual" | "Manual" | "demand" => "manual",
+        "禁用" | "disabled" | "Disabled" => "disabled",
+        other => return Err(format!("不支持的启动类型: {}", other)),
+    };
+    secm_datasource::service::set_service_start_type(name, normalized)
+        .map_err(|e| format!("设置服务 '{}' 启动类型失败: {}", name, e))?;
+    Ok(format!("服务 '{}' 启动类型已设为 {}", name, normalized))
+}

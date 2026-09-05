@@ -9,6 +9,7 @@ use gpui::prelude::*;
 use crate::pages::about::AboutView;
 use crate::pages::dashboard::DashboardView;
 use crate::pages::logs::LogsView;
+use crate::pages::services::ServicesView;
 use crate::pages::settings::SettingsView;
 use crate::theme::Theme;
 
@@ -67,6 +68,7 @@ pub struct AppRoot {
     dashboard: Entity<DashboardView>,
     logs: Entity<LogsView>,
     settings: Entity<SettingsView>,
+    services: Entity<ServicesView>,
     about: Entity<AboutView>,
 }
 
@@ -76,6 +78,7 @@ impl AppRoot {
         let dashboard = cx.new(|cx| DashboardView::new(cx));
         let logs = cx.new(|cx| LogsView::new(cx));
         let settings = cx.new(|cx| SettingsView::new(cx));
+        let services = cx.new(|cx| ServicesView::new(cx));
         let about = cx.new(|_| AboutView::new());
         Self {
             theme,
@@ -83,6 +86,7 @@ impl AppRoot {
             dashboard,
             logs,
             settings,
+            services,
             about,
         }
     }
@@ -182,6 +186,7 @@ impl AppRoot {
             Page::Dashboard => self.dashboard.clone().into_any_element(),
             Page::Logs => self.logs.clone().into_any_element(),
             Page::Settings => self.settings.clone().into_any_element(),
+            Page::Services => self.services.clone().into_any_element(),
             Page::About => self.about.clone().into_any_element(),
             other => {
                 let theme = self.theme;

@@ -2,4 +2,5 @@
 pub mod about;
 pub mod dashboard;
 pub mod logs;
+pub mod services;
 pub mod settings;
