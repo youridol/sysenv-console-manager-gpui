@@ -29,9 +29,17 @@ sysenv-console-manager-gpui/
 │   └── secm-app/          # GPUI 桌面应用（UI + 装配 + main）
 ├── docs/adr/              # 架构决策记录（重构全案）
 ├── docs/spec/             # 功能基准（验收依据）
-├── sidecar-lhm/           # LHM sidecar（.NET 源码，随包分发）
-└── third_party/           # 第三方驱动依赖 + 许可
+└── LICENSE                # MIT
 ```
+
+> LHM 温度 sidecar（.NET，MPL-2.0）与第三方驱动（third_party/）沿用原 Tauri 仓库
+> https://github.com/youridol/sysenv-console-manager 的资产；运行时优先加载 exe 同目录
+> `lhm/publish/LhmSidecar.exe`（也可用环境变量 `SECM_LHM_SIDECAR` 指定目录）。
+
+## 页面
+
+11 个页面全部以 GPUI 实现：硬件信息（Dashboard）、清理优化、网络诊断、网络配置、
+系统设置、服务管理、环境检测、AI 环境、硬件检测、调试日志、关于。
 
 ## 构建
 
@@ -39,7 +47,7 @@ sysenv-console-manager-gpui/
 cargo build            # debug
 cargo test             # workspace 全部单测
 cargo run -p secm-app  # 运行应用
-cargo build --release  # 发布构建
+cargo build --release  # 发布构建（产物 target/release/secm-app.exe）
 ```
 
 ## 许可证
