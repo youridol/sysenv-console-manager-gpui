@@ -1,3 +1,4 @@
 // secm-app pages 模块
+pub mod about;
 pub mod dashboard;
 pub mod logs;
