@@ -10,6 +10,8 @@ use crate::theme::Theme;
 
 pub struct HardwareView {
     disks: Vec<DiskListItem>,
+    /// 磁盘列表加载中（IOCTL 枚举慢，后台执行）
+    loading_disks: bool,
     /// 正在读取 SMART 的磁盘 id（转圈提示）
     loading_smart: Option<String>,
     /// 展开的磁盘 id → SMART 视图
@@ -21,7 +23,8 @@ pub struct HardwareView {
 impl HardwareView {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let mut v = Self {
-            disks: hardware::list_disks(),
+            disks: Vec::new(),
+            loading_disks: false,
             loading_smart: None,
             smart: std::collections::HashMap::new(),
             error: String::new(),
@@ -30,15 +33,35 @@ impl HardwareView {
         v
     }
 
+    /// 后台枚举磁盘（IOCTL 打开 0..64 物理盘 + WMI 回退，慢；结果回填）
     fn refresh_disks(&mut self, cx: &mut Context<Self>) {
-        self.disks = hardware::list_disks();
+        if self.loading_disks {
+            return;
+        }
+        self.loading_disks = true;
         cx.notify();
+
+        let weak = cx.entity().downgrade();
+        cx.spawn(async move |_this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+            let exec = cx.background_executor().clone();
+            let disks = exec.spawn(async move { hardware::list_disks() }).await;
+            if let Some(view) = weak.upgrade() {
+                view.update(cx, |this, cx| {
+                    this.loading_disks = false;
+                    this.disks = disks;
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
+    /// 后台刷新磁盘清单并清除已展开 SMART/错误
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.disks = hardware::list_disks();
         self.smart.clear();
         self.error.clear();
+        self.refresh_disks(cx);
         cx.notify();
     }
 
@@ -97,6 +120,7 @@ impl Render for HardwareView {
         let theme = Theme::dark();
         let disks: Vec<DiskListItem> = self.disks.clone();
         let total_gb: f64 = disks.iter().map(|d| d.size_gb).sum();
+        let loading_disks = self.loading_disks;
 
         div()
             .flex_col()
@@ -129,17 +153,21 @@ impl Render for HardwareView {
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.refresh(cx);
                             }))
-                            .child("刷新磁盘列表"),
+                            .child(if loading_disks { "检测中…" } else { "刷新磁盘列表" }),
                     )
                     .child(
                         div()
                             .text_size(px(12.0))
                             .text_color(theme.text_muted)
-                            .child(SharedString::from(format!(
-                                "{} 块磁盘 · 合计 {:.1} GB",
-                                disks.len(),
-                                total_gb
-                            ))),
+                            .child(if loading_disks {
+                                SharedString::from("正在枚举物理磁盘…")
+                            } else {
+                                SharedString::from(format!(
+                                    "{} 块磁盘 · 合计 {:.1} GB",
+                                    disks.len(),
+                                    total_gb
+                                ))
+                            }),
                     ),
             )
             // 错误消息

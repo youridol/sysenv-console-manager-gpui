@@ -3,7 +3,7 @@
 // 修改类操作需管理员权限：命令层 is_admin 门禁返回中文错误。
 
 use gpui::prelude::*;
-use gpui::{div, px, rgb, SharedString, Window, Context, Render, Entity};
+use gpui::{div, px, rgb, SharedString, Window, Context, Render, Entity, WeakEntity};
 use secm_core::netif::{self, AdapterConfig};
 use secm_core::net_config::{self, ApplyStep};
 
@@ -20,6 +20,10 @@ pub struct NetConfigView {
     status: String,
     /// 管理员标记
     admin: bool,
+    /// 适配器列表加载中
+    loading_adapters: bool,
+    /// 网络配置应用进行中（netsh 后台执行，互斥防连点）
+    applying: bool,
     // 修改用输入框
     mac_input: Entity<TextField>,
     dns_input: Entity<TextField>,
@@ -57,11 +61,13 @@ impl NetConfigView {
         }
 
         let mut v = Self {
-            adapters: netif::list_adapters().unwrap_or_default(),
+            adapters: Vec::new(),
             selected: None,
             steps: Vec::new(),
             status: String::new(),
             admin: secm_core::settings::is_admin(),
+            loading_adapters: false,
+            applying: false,
             mac_input,
             dns_input,
             ipv4_input,
@@ -70,25 +76,49 @@ impl NetConfigView {
             ipv6_input,
             ipv6_gw_input,
         };
-        // 默认选中首个 Up 接口
-        v.selected = v
-            .adapters
-            .iter()
-            .find(|a| a.status == "Up")
-            .map(|a| a.name.clone())
-            .or_else(|| v.adapters.first().map(|a| a.name.clone()));
+        // 后台枚举适配器并自动选中首个 Up 接口
+        v.refresh(cx);
         v
     }
 
+    /// 后台枚举适配器（GetAdaptersAddresses 网络 API），完成后保持/更新选中
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.adapters = netif::list_adapters().unwrap_or_default();
-        // 保持当前选中（若仍存在）
-        if let Some(cur) = &self.selected {
-            if !self.adapters.iter().any(|a| &a.name == cur) {
-                self.selected = None;
-            }
+        if self.loading_adapters {
+            return;
         }
+        self.loading_adapters = true;
         cx.notify();
+
+        let weak: WeakEntity<Self> = cx.entity().downgrade();
+        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+            let exec = cx.background_executor().clone();
+            let adapters = exec
+                .spawn(async move { netif::list_adapters().unwrap_or_default() })
+                .await;
+            if let Some(view) = weak.upgrade() {
+                view.update(cx, |this, cx| {
+                    this.loading_adapters = false;
+                    this.adapters = adapters;
+                    // 保持当前选中（若仍存在），否则自动选首个 Up 接口
+                    let keep = this
+                        .selected
+                        .as_ref()
+                        .map(|cur| this.adapters.iter().any(|a| &a.name == cur))
+                        .unwrap_or(false);
+                    if !keep {
+                        this.selected = this
+                            .adapters
+                            .iter()
+                            .find(|a| a.status == "Up")
+                            .map(|a| a.name.clone())
+                            .or_else(|| this.adapters.first().map(|a| a.name.clone()));
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     fn selected_adapter(&self) -> Option<&AdapterConfig> {
@@ -125,6 +155,37 @@ impl NetConfigView {
         cx.notify();
     }
 
+    /// 后台执行网络配置应用（netsh 串行 2-7 个进程，需数百 ms~秒级 → 绝不上主线程）
+    fn run_apply(&mut self, req: net_config::NetworkConfigRequest, cx: &mut Context<Self>) {
+        if self.applying {
+            return;
+        }
+        self.applying = true;
+        self.status = "正在应用网络配置（netsh 执行中，可能需要几秒）…".to_string();
+        cx.notify();
+
+        let weak: WeakEntity<Self> = cx.entity().downgrade();
+        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+            let exec = cx.background_executor().clone();
+            let result = exec
+                .spawn(async move { net_config::apply_network_config(&req) })
+                .await;
+            if let Some(view) = weak.upgrade() {
+                view.update(cx, |this, cx| {
+                    this.applying = false;
+                    this.apply_result(result, cx);
+                })
+                .ok();
+                // netsh 生效后延迟后台刷新配置
+                view.update(cx, |this, cx| {
+                    this.schedule_refresh(cx);
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
     /// 一键切换 IPv4 DHCP
     fn set_dhcp(&mut self, cx: &mut Context<Self>) {
         let Some(name) = self.selected.clone() else {
@@ -149,10 +210,7 @@ impl NetConfigView {
             mode_dns6: "dhcp".into(),
             dns6: vec![],
         };
-        let r = net_config::apply_network_config(&req);
-        self.apply_result(r, cx);
-        // 稍后刷新配置
-        self.refresh_after(cx);
+        self.run_apply(req, cx);
     }
 
     /// 应用静态 IPv4（地址/掩码/网关）+ 静态 DNS
@@ -204,9 +262,7 @@ impl NetConfigView {
             mode_dns6: "dhcp".into(),
             dns6: vec![],
         };
-        let r = net_config::apply_network_config(&req);
-        self.apply_result(r, cx);
-        self.refresh_after(cx);
+        self.run_apply(req, cx);
     }
 
     /// 应用静态 IPv6 地址/网关
@@ -236,9 +292,7 @@ impl NetConfigView {
             mode_dns6: "dhcp".into(),
             dns6: vec![],
         };
-        let r = net_config::apply_network_config(&req);
-        self.apply_result(r, cx);
-        self.refresh_after(cx);
+        self.run_apply(req, cx);
     }
 
     /// 应用 MAC 修改（注册表 + 重启网卡）
@@ -296,11 +350,11 @@ impl NetConfigView {
         cx.notify();
     }
 
-    /// 延迟刷新适配器配置（netsh 生效后）
-    fn refresh_after(&mut self, cx: &mut Context<Self>) {
+    /// 延迟后台刷新适配器配置（netsh 生效后）
+    fn schedule_refresh(&mut self, cx: &mut Context<Self>) {
         let weak = cx.entity().downgrade();
         cx.spawn(async move |_this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-            gpui::Timer::after(std::time::Duration::from_millis(1200)).await;
+            gpui::Timer::after(std::time::Duration::from_millis(1500)).await;
             if let Some(view) = weak.upgrade() {
                 view.update(cx, |this, cx| {
                     this.refresh(cx);
