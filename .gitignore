@@ -25,3 +25,10 @@ Desktop.ini
 
 # 冒烟测试输出
 *-smoke.*
+
+# 诊断产物
+win-check.*
+rel.out
+rel.err
+diag-*.out
+diag-*.err
