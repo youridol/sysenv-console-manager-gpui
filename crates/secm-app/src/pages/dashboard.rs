@@ -44,6 +44,56 @@ impl DashboardView {
         .detach();
     }
 
+    /// GPU 摘要卡（数据来自 LHM；无 GPU 时占位）
+    fn gpu_stat_card(&self, theme: &Theme, s: &SensorSnapshot) -> impl IntoElement {
+        match s.gpu.first() {
+            Some(g) => {
+                let gpu_stats = vec![
+                    (
+                        theme.brand,
+                        format!("占用 {:.0}%", g.usage),
+                        None,
+                    ),
+                    (
+                        rgb(0xf87171),
+                        if g.temperature > 0.0 {
+                            format!("温度 {:.0}°C", g.temperature)
+                        } else {
+                            "温度 —".to_string()
+                        },
+                        None,
+                    ),
+                    (
+                        rgb(0x38bdf8),
+                        if g.memory_total > 0 {
+                            format!(
+                                "显存 {:.0} / {:.0} GB",
+                                gb(g.memory_used),
+                                gb(g.memory_total)
+                            )
+                        } else {
+                            "显存 —".to_string()
+                        },
+                        None,
+                    ),
+                    (
+                        theme.text_muted,
+                        g.name.clone(),
+                        None,
+                    ),
+                ];
+                self.stat_card(theme, "GPU", rgb(0xa78bfa), format!("{:.0}%", g.usage), gpu_stats)
+                    .into_any_element()
+            }
+            None => {
+                // 无 GPU 数据：占位卡
+                let stats = vec![(theme.text_muted, "未检测到 GPU（LHM 不可用或无独显）".to_string(), None)];
+                self.stat_card(theme, "GPU", rgb(0xa78bfa), "—".into(), stats)
+                    .into_any_element()
+            }
+        }
+    }
+
     /// 摘要卡（标题 + 圆点图标色 + 主值 + 统计行）
     fn stat_card(
         &self,
@@ -228,14 +278,15 @@ impl Render for DashboardView {
                             ),
                     ),
             )
-            // 卡片网格（等宽 3 列）
+            // 卡片网格（等宽 2 列：CPU/内存 + GPU/磁盘）
             .child(
                 div()
                     .grid()
-                    .grid_cols(3)
+                    .grid_cols(2)
                     .gap_4()
                     .child(self.stat_card(&theme, "CPU", rgb(0x4f7cff), format!("{:.0}%", cpu.usage), cpu_stats))
                     .child(self.stat_card(&theme, "内存", rgb(0x4ade80), format!("{:.0}%", mem.usage_percent), mem_stats))
+                    .child(self.gpu_stat_card(&theme, s))
                     .child(self.stat_card(&theme, disk_title, rgb(0xfbbf24), disk_main, disk_stats)),
             )
             // diag 行
