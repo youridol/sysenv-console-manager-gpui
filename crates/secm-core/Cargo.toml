@@ -42,3 +42,4 @@ windows-sys = { workspace = true, features = [
 ] }
 parking_lot = "0.12"
 chrono = "0.4"
+winreg = "0.52"

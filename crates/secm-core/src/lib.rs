@@ -7,3 +7,4 @@ pub mod lhm;
 pub mod logger;
 pub mod sensor;
 pub mod sensor_service;
+pub mod settings;
