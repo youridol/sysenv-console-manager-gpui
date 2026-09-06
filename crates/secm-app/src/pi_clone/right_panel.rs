@@ -205,46 +205,68 @@ impl PiShell {
             .child(icons::icon(Icon::Panel, 16.0).text_color(if self.right_open { pal.text } else { pal.text_muted }))
     }
 
-    /// 日志流主体（滚动行列表；自动跟随最新）
+    /// 日志流主体（滚动行列表；自动跟随最新；点击行复制该条日志）
     fn log_stream(&mut self, pal: &Palette, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let level = self.log_filter_level.clone();
         let rows: Vec<gpui::AnyElement> = self
             .log_rows
             .iter()
             .filter(|e| level.is_empty() || e.level == level)
-            .map(|e| {
+            .enumerate()
+            .map(|(ix, e)| {
                 let color = match e.level.as_str() {
                     "Error" => pal.danger,
                     "Warn" => pal.warning,
                     "Info" => pal.success,
                     _ => pal.text_muted,
                 };
+                // 复制内容：整行日志文本
+                let copy_text = format!(
+                    "[{}] {} {}",
+                    e.level,
+                    e.timestamp,
+                    e.message
+                );
                 div()
+                    .id(SharedString::from(format!("pi-log-row-{ix}-{}", e.level)))
                     .flex()
-                    .items_baseline()
+                    .items_start()
                     .gap(px(6.0))
                     .px(px(8.0))
                     .py(px(2.0))
+                    .rounded(px(4.0))
+                    .cursor_pointer()
                     .border_b_1()
                     .border_color(pal.separator)
+                    .hover(|s| s.bg(pal.bg_hover))
+                    .on_click(move |_ev, _w, cx| {
+                        // 点击日志行 → 复制该条到系统剪贴板
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_text.clone()));
+                        log::debug!("日志流 · 已复制一行日志到剪贴板");
+                    })
                     .child(
                         div()
                             .w(px(52.0))
                             .flex_none()
+                            .pt(px(2.0))
                             .text_size(px(10.0))
                             .text_color(color)
                             .child(SharedString::from(e.level.clone())),
                     )
                     .child(
                         div()
-                            .w(px(108.0))
+                            .w(px(100.0))
                             .flex_none()
+                            .pt(px(2.0))
                             .text_size(px(9.5))
                             .text_color(pal.text_dim)
                             .child(SharedString::from(e.timestamp.clone())),
                     )
+                    // 消息占满剩余宽度并自动折行（min_w 0 允许收缩；不再被右侧裁断）
                     .child(
                         div()
+                            .flex_1()
+                            .min_w(px(0.0))
                             .text_size(px(11.0))
                             .text_color(pal.text)
                             .child(SharedString::from(e.message.clone())),

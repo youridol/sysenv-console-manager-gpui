@@ -29,10 +29,13 @@ impl Render for AboutView {
         ];
 
         div()
+            .id("about-page-root")
             .flex_col()
             .size_full()
             .p_6()
             .gap_4()
+            // 内容超高时整页纵向滚动
+            .overflow_y_scroll()
             .child(
                 div()
                     .text_size(px(24.0))

@@ -441,10 +441,13 @@ impl Render for NetConfigView {
         let status_msg = self.status.clone();
 
         div()
+            .id("net_config-page-root")
             .flex_col()
             .size_full()
             .p_6()
             .gap_4()
+            // 内容超高时整页纵向滚动
+            .overflow_y_scroll()
             // 页头
             .child(
                 div()

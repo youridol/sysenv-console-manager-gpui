@@ -765,7 +765,7 @@ impl PiShell {
                     .child(self.rate_pill(pal, "↓ 下行".into(), fmt_rate(ni.rate.rx_kbps)))
                     .child(self.rate_pill(pal, "↑ 上行".into(), fmt_rate(ni.rate.tx_kbps))),
             )
-            // 本地 IPv4
+            // 本地 IPv4（值可点击复制）
             .child(
                 div()
                     .mt(px(5.0))
@@ -778,20 +778,11 @@ impl PiShell {
                             .text_color(pal.text_dim)
                             .child(SharedString::from("本地 IPv4")),
                     )
-                    .child(
-                        div()
-                            .text_size(px(10.5))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(pal.text)
-                            .child(SharedString::from(if local_v4.is_empty() {
-                                "—".to_string()
-                            } else {
-                                local_v4
-                            })),
-                    ),
+                    .child(self.copyable_ip_value(pal, "local-v4", local_v4)),
             )
             // 公网 4 槽
             .children(pub_rows.into_iter().map(|(k, v, d)| {
+                let row_id = k.clone();
                 div()
                     .mt(px(2.0))
                     .flex()
@@ -809,15 +800,7 @@ impl PiShell {
                             .items_center()
                             .gap(px(4.0))
                             .min_w(px(0.0))
-                            .child(
-                                div()
-                                    .max_w(px(130.0))
-                                    .truncate()
-                                    .text_size(px(10.5))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(if v == "—" { pal.text_dim } else { pal.text })
-                                    .child(SharedString::from(v.clone())),
-                            )
+                            .child(self.copyable_ip_value(pal, &row_id, v.clone()))
                             .when(!d.is_empty(), |s| {
                                 s.child(
                                     div()
@@ -829,6 +812,41 @@ impl PiShell {
                     )
             }))
             .into_any_element()
+    }
+
+    /// 网络信息卡 IP 值（可点击复制；非 IP/空值显示「—」不可点）
+    fn copyable_ip_value(&self, pal: &Palette, row_id: &str, value: String) -> impl IntoElement {
+        let copyable = !value.is_empty() && value != "—" && value != "未连接";
+        let text_color = if copyable { pal.text } else { pal.text_dim };
+        // id 由行标识 + 值构成（同层唯一）
+        let el_id = SharedString::from(format!("pi-net-val-{row_id}"));
+        div()
+            .id(el_id)
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .max_w(px(150.0))
+            .cursor_pointer()
+            .when(copyable, |s| {
+                s.hover(|s| s.text_color(pal.accent))
+            })
+            .child(
+                div()
+                    .max_w(px(130.0))
+                    .truncate()
+                    .text_size(px(10.5))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(text_color)
+                    .child(SharedString::from(if value.is_empty() { "—".to_string() } else { value.clone() })),
+            )
+            .when(copyable, |s| {
+                s.on_click(move |_ev, _w, cx| {
+                    // 点击 IP → 复制；阻断冒泡避免触发外层整卡刷新
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(value.clone()));
+                    cx.stop_propagation();
+                    log::debug!("网络信息 · 已复制 {}", value);
+                })
+            })
     }
 
     /// 上下行速率小标签（等宽两列展示）

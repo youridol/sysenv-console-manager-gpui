@@ -35,7 +35,7 @@ fn main() {
         // 文本输入控件按键绑定（TextField keymap 上下文）
         crate::ui::text_input::bind_text_field_keys(cx);
 
-        let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
+        let bounds = Bounds::centered(None, size(px(1600.0), px(900.0)), cx);
         let _ = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),

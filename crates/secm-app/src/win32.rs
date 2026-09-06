@@ -14,7 +14,7 @@ use windows_sys::Win32::Graphics::Dwm::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, SendMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_STYLE,
     SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_CLOSE,
-    WS_CAPTION, WS_SYSMENU, WS_THICKFRAME, SW_MINIMIZE,
+    WS_CAPTION, WS_SYSMENU, SW_MINIMIZE,
 };
 
 /// 从 gpui Window 取 HWND（与 icons.rs 相同桥接）
@@ -27,15 +27,16 @@ pub fn hwnd_from_window(window: &mut gpui::Window) -> Option<HWND> {
     None
 }
 
-/// 完全移除原生窗口边框与标题栏：
-///   去 WS_CAPTION | WS_SYSMENU | WS_THICKFRAME → 客户区 = 窗口全尺寸，
-///   内容直达窗口最顶（无顶部刘海/边框留白）。
+/// 移除原生标题栏但保留可拉伸边框：
+///   去 WS_CAPTION | WS_SYSMENU → 客户区无标题栏（左右侧栏贯穿窗体顶部），
+///   保留 WS_THICKFRAME → 系统提供四边/四角边缘拖拽拉伸 + 最大化双线光标。
+///   （v2.4.1：此前一并去除 THICKFRAME 导致窗口不可拉伸；GPUI 的 resize
+///   hit-test 依赖 DefWindowProc 对 THICKFRAME 样式返回 HTLEFT/HTRIGHT 等区域。）
 /// 保留 WS_MAXIMIZEBOX / WS_MINIMIZEBOX（任务栏与最大化/最小化能力）。
-/// 可调大小改为自绘边缘（见 ui 层 resize 热区），此处不再依赖系统边框。
 pub fn strip_title_bar(hwnd: HWND) {
     unsafe {
         let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
-        let new_style = style & !(WS_CAPTION | WS_SYSMENU | WS_THICKFRAME);
+        let new_style = style & !(WS_CAPTION | WS_SYSMENU);
         if new_style != style {
             SetWindowLongPtrW(hwnd, GWL_STYLE, new_style as isize);
             SetWindowPos(

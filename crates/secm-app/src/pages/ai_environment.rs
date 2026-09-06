@@ -298,10 +298,13 @@ impl Render for AiEnvironmentView {
         let action_busy = self.action_busy;
 
         div()
+            .id("ai_environment-page-root")
             .flex_col()
             .size_full()
             .p_6()
             .gap_4()
+            // 内容超高时整页纵向滚动
+            .overflow_y_scroll()
             // 页头
             .child(
                 div()

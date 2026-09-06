@@ -385,10 +385,13 @@ impl Render for SettingsView {
         let status = self.status.clone();
 
         div()
+            .id("settings-page-root")
             .flex_col()
             .size_full()
             .p_6()
             .gap_4()
+            // 内容超高时整页纵向滚动（v2.4.1：修复内容超高被外层裁切）
+            .overflow_y_scroll()
             // 页头
             .child(
                 div()
