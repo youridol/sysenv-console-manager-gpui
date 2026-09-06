@@ -303,25 +303,36 @@ impl Render for CleanupView {
                             .flex_col()
                             .when(side_by_side, |s| s.flex_1().min_w(px(0.0)))
                             .gap_4()
-                            // 快捷操作
+                            // 快捷操作（现代化卡片）
                             .child(
                                 div()
                                     .flex_col()
-                                    .p_4()
-                                    .rounded_md()
+                                    .rounded(px(12.0))
                                     .border_1()
                                     .border_color(theme.border)
                                     .bg(theme.panel)
-                                    .gap_3()
+                                    .overflow_hidden()
                                     .child(
                                         div()
-                                            .text_size(px(14.0))
-                                            .font_weight(gpui::FontWeight::MEDIUM)
-                                            .text_color(theme.text)
-                                            .child("快捷操作"),
+                                            .flex()
+                                            .items_center()
+                                            .gap_2p5()
+                                            .px_5()
+                                            .py_3()
+                                            .child(div().size(px(6.0)).rounded_full().bg(theme.success))
+                                            .child(
+                                                div()
+                                                    .text_size(px(15.0))
+                                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                    .text_color(theme.text)
+                                                    .child("快捷操作"),
+                                            ),
                                     )
+                                    .child(div().h(px(1.0)).w_full().bg(theme.border))
                                     .child(
                                         div()
+                                            .px_5()
+                                            .py_4()
                                             .flex()
                                             .flex_wrap()
                                             .gap_2()
@@ -334,17 +345,56 @@ impl Render for CleanupView {
                                             ),
                                     ),
                             )
-                            // 进程表
+                            // 进程表（现代化容器 + 搜索过滤）
                             .child(
-                                crate::ui::table_container(&theme).child(
-                                    div()
-                                        .id("proc-scroll")
-                                        .flex_col()
-                                        .h(px(400.0))
-                                        .overflow_scroll()
-                                        .child(crate::ui::table_head(&theme, &["PID", "进程名", "内存", "优先级"]))
-                                        .children(procs.iter().map(|p| self.proc_row(&theme, p, cx))),
-                                ),
+                                div()
+                                    .flex_col()
+                                    .rounded(px(12.0))
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .bg(theme.panel)
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2p5()
+                                            .px_5()
+                                            .py_3()
+                                            .child(div().size(px(6.0)).rounded_full().bg(theme.info))
+                                            .child(
+                                                div()
+                                                    .text_size(px(15.0))
+                                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                    .text_color(theme.text)
+                                                    .child("进程管理"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .flex()
+                                                    .justify_end()
+                                                    .child(
+                                                        div()
+                                                            .text_size(px(11.5))
+                                                            .text_color(theme.text_muted)
+                                                            .child(SharedString::from(format!(
+                                                                "{} 个进程",
+                                                                procs.len()
+                                                            ))),
+                                                    ),
+                                            ),
+                                    )
+                                    .child(div().h(px(1.0)).w_full().bg(theme.border))
+                                    .child(
+                                        div()
+                                            .id("proc-scroll")
+                                            .flex_col()
+                                            .h(px(380.0))
+                                            .overflow_scroll()
+                                            .child(crate::ui::table_head(&theme, &["PID", "进程名", "内存", "优先级"]))
+                                            .children(procs.iter().map(|p| self.proc_row(&theme, p, cx))),
+                                    ),
                             ),
                     ),
             )
@@ -352,50 +402,133 @@ impl Render for CleanupView {
 }
 
 impl CleanupView {
-    /// 缓存清理卡片（厂商/系统缓存按钮组）
+    /// 缓存清理卡片（现代化：强调标题条 + 分组子区 + 语义色按钮）
     fn clean_card(&self, theme: &Theme, cleaning: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        // 标题行：强调色短条 + 标题 + 右侧清理说明
         div()
             .flex_col()
-            .p_4()
-            .rounded_md()
+            .rounded(px(12.0))
             .border_1()
             .border_color(theme.border)
             .bg(theme.panel)
-            .gap_3()
-            .child(
-                div()
-                    .text_size(px(14.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child("缓存清理"),
-            )
-            .child(
-                div()
-                    .text_size(px(11.5))
-                    .text_color(theme.text_muted)
-                    .child("清理临时文件与各厂商着色器缓存；被占用文件将标记为重启后自动删除。"),
-            )
+            .overflow_hidden()
+            // 卡片头：渐变强调
             .child(
                 div()
                     .flex()
+                    .items_center()
+                    .gap_2p5()
+                    .px_5()
+                    .py_3()
+                    .child(div().size(px(6.0)).rounded_full().bg(theme.brand))
+                    .child(
+                        div()
+                            .text_size(px(15.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme.text)
+                            .child("缓存清理"),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .justify_end()
+                            .flex()
+                            .child(
+                                div()
+                                    .px_2p5()
+                                    .py_1()
+                                    .rounded_full()
+                                    .text_size(px(11.0))
+                                    .text_color(theme.success)
+                                    .border_1()
+                                    .border_color(theme.success)
+                                    .child("安全清理 · 重启后删占用文件"),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .h(px(1.0))
+                    .w_full()
+                    .bg(theme.border),
+            )
+            // 说明行
+            .child(
+                div()
+                    .px_5()
+                    .pt_3()
+                    .text_size(px(11.5))
+                    .text_color(theme.text_muted)
+                    .child("清理系统临时文件与显卡厂商着色器缓存，释放磁盘空间。"),
+            )
+            // 分组：系统缓存
+            .child(
+                div()
+                    .px_5()
+                    .pt_4()
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text_muted)
+                            .child("系统临时"),
+                    ),
+            )
+            .child(
+                div()
+                    .px_5()
+                    .pt_2p5()
+                    .flex()
                     .flex_wrap()
                     .gap_2()
-                    .child(self.clean_button(theme, CleanOp::Temp, cleaning, cx))
+                    .child(self.clean_button(theme, CleanOp::Temp, cleaning, cx)),
+            )
+            // 分组：显卡着色器
+            .child(
+                div()
+                    .px_5()
+                    .pt_4()
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text_muted)
+                            .child("显卡着色器缓存"),
+                    ),
+            )
+            .child(
+                div()
+                    .px_5()
+                    .pt_2p5()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
                     .child(self.clean_button(theme, CleanOp::Nvidia, cleaning, cx))
                     .child(self.clean_button(theme, CleanOp::Amd, cleaning, cx))
                     .child(self.clean_button(theme, CleanOp::DirectX, cleaning, cx))
                     .child(self.clean_button(theme, CleanOp::Steam, cleaning, cx)),
             )
+            // 底部操作条：一键清理（主）+ 修剪工作集（危险）
             .child(
                 div()
+                    .mt_4()
+                    .px_5()
+                    .py_4()
+                    .border_t_1()
+                    .border_color(theme.border)
                     .flex()
+                    .items_center()
                     .gap_2()
                     .child(self.clean_button(theme, CleanOp::AllShaders, cleaning, cx))
+                    .child(
+                        div()
+                            .flex_1(),
+                    )
                     .child(self.clean_button(theme, CleanOp::TrimWorkingSet, cleaning, cx)),
             )
     }
 
-    /// 清理按钮（背景按操作区分；执行中禁用）
+    /// 清理按钮（现代化：普通=中性、危险=红调、一键=品牌主色；执行中禁用）
     fn clean_button(
         &self,
         theme: &Theme,
@@ -406,19 +539,30 @@ impl CleanupView {
         let label = op.label().to_string();
         let danger = matches!(op, CleanOp::TrimWorkingSet);
         let all = matches!(op, CleanOp::AllShaders);
+        // 三态配色（禁用时统一弱化）
+        let (bg, hover, fg) = if cleaning {
+            (theme.panel_hover, theme.panel_hover, theme.text_muted)
+        } else if all {
+            (theme.brand, rgb(0x3d66e6), rgb(0xffffff))
+        } else if danger {
+            (rgb(0x7f1d1d), rgb(0x991b1b), rgb(0xffffff))
+        } else {
+            (theme.panel_hover, theme.border, theme.text)
+        };
         div()
             .id(SharedString::from(format!("clean-{:?}", op)))
-            .px_3()
-            .py_1p5()
-            .rounded_md()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .px_3p5()
+            .h(px(30.0))
+            .rounded(px(8.0))
             .cursor_pointer()
-            .when(!cleaning, |s| {
-                s.when(all, |s| s.bg(theme.brand).hover(|s| s.bg(rgb(0x3d66e6))).text_color(rgb(0xffffff)))
-                    .when(!all && danger, |s| s.bg(theme.panel_hover).hover(|s| s.bg(rgb(0x7f1d1d))).text_color(theme.text))
-                    .when(!all && !danger, |s| s.bg(theme.panel_hover).hover(|s| s.bg(theme.border)).text_color(theme.text))
-            })
-            .when(cleaning, |s| s.bg(theme.bg).text_color(theme.text_muted))
             .text_size(px(12.5))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(fg)
+            .bg(bg)
+            .hover(|s| s.bg(hover))
             .on_click(cx.listener(move |this, _, _, cx| {
                 if !cleaning {
                     this.run_clean(op, cx);

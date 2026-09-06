@@ -210,10 +210,16 @@ impl PiShell {
         cx.notify();
     }
 
-    /// 清空日志流面板（仅清屏显示，不动全局缓冲与落盘）
+    /// 清空日志流面板（同时清空全局环形缓冲与本地显示，做到真正清屏；
+    /// 保留按天落盘文件不动）
     pub fn clear_log_panel(&mut self, cx: &mut Context<Self>) {
+        // 先清全局缓冲（否则 500ms 轮询会把旧日志全量回填到面板）
+        LogBuffer::clear(&LogBuffer::global());
+        // 本地同步清空（此刻全局为空，轮询不会再回填旧日志）
         self.log_rows.clear();
-        log::info!("日志流已清空显示（全局缓冲与落盘保留）");
+        cx.notify();
+        // 记录清屏动作：落到已清空的全局缓冲，面板只出现这一条新日志
+        log::info!("日志流已清空");
         cx.notify();
     }
 
