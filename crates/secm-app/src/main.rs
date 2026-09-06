@@ -48,6 +48,8 @@ fn main() {
                 // 移除原生标题栏：左右侧栏贯穿窗体顶部（客户区 = 全窗口）
                 if let Some(hwnd) = win32::hwnd_from_window(window) {
                     win32::strip_title_bar(hwnd);
+                    // 主窗体四角改圆角（DWM；Win11 生效，最大化自动方角）
+                    win32::set_rounded_corners(hwnd);
                 }
                 cx.new(pi_clone::PiShell::new)
             },

@@ -23,6 +23,8 @@ windows-sys = { workspace = true, features = [
     "Win32_System_LibraryLoader",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
+    # 窗口四角圆角（DWM WINDOW_CORNER_PREFERENCE，Win11 22000+）
+    "Win32_Graphics_Dwm",
 ] }
 
 [build-dependencies]

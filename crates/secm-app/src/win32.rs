@@ -8,6 +8,9 @@
 // 复用 icons.rs 的 raw_window_handle 桥接模式（gpui Window → HWND）。
 
 use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, SendMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_STYLE,
     SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_CLOSE,
@@ -45,6 +48,26 @@ pub fn strip_title_bar(hwnd: HWND) {
                 SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
             );
         }
+    }
+}
+
+/// 主窗体四角改圆角（DWM 窗口圆角偏好）。
+///
+/// - 仅 Windows 11（22000+）支持 `DWMWA_WINDOW_CORNER_PREFERENCE`；Win10/旧版
+///   调用返回错误，静默忽略（保持直角，不影响功能）。
+/// - DWM 在窗口最大化时自动切换为方角、还原时恢复圆角，无需额外处理。
+/// - 圆角半径由系统主题决定（默认约 8px，跟随系统设置），无法自定义精确像素。
+/// 需在 `strip_title_bar`（去除系统边框）之后调用，否则边框样式冲突。
+pub fn set_rounded_corners(hwnd: HWND) {
+    let preference: i32 = DWMWCP_ROUND;
+    // SAFETY: hwnd 为有效窗口句柄；pvattribute 指向栈上 i32，cbattribute 为长度
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+            &preference as *const i32 as *const core::ffi::c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
     }
 }
 
