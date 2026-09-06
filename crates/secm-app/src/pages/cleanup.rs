@@ -239,12 +239,15 @@ impl CleanupView {
 }
 
 impl Render for CleanupView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::dark();
         let procs = self.filtered();
         let status = self.status.clone();
         let cleaning = self.cleaning;
         let last_result = self.last_result.clone();
+        // 响应式：主内容区过窄时左右两栏改为上下堆叠（自适应）
+        let vw = f32::from(window.viewport_size().width);
+        let side_by_side = vw >= 900.0;
 
         div()
             .id("cleanup-page-root")
@@ -274,51 +277,76 @@ impl Render for CleanupView {
                         .child(msg),
                 )
             })
-            // 缓存清理区
-            .child(self.clean_card(&theme, cleaning, cx))
-            // 清理结果面板（追溯）
-            .when_some(last_result, |s, r| s.child(self.result_panel(&theme, &r)))
-            // 快捷操作
+            // 主体：窗口宽时左右两栏（左=缓存清理+结果；右=快捷+进程）；
+            // 窄窗（<900）时上下堆叠（响应式自适应）
             .child(
                 div()
-                    .flex_col()
-                    .p_4()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.panel)
-                    .gap_3()
+                    .flex()
+                    .when(!side_by_side, |s| s.flex_col())
+                    .items_start()
+                    .gap_4()
+                    // 左列（缓存清理）
                     .child(
                         div()
-                            .text_size(px(14.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child("快捷操作"),
+                            .flex_col()
+                            .when(side_by_side, |s| s.flex_1().min_w(px(0.0)))
+                            .gap_4()
+                            .child(self.clean_card(&theme, cleaning, cx))
+                            // 清理结果面板（追溯）
+                            .when_some(last_result.clone(), |s, r| {
+                                s.child(self.result_panel(&theme, &r))
+                            }),
                     )
+                    // 右列（快捷操作 + 进程管理）
                     .child(
                         div()
-                            .flex()
-                            .gap_2()
-                            .child(self.op_button(&theme, "刷新 DNS 缓存", QuickOp::FlushDns, cx))
-                            .child(self.op_button(&theme, "刷新进程列表", QuickOp::RefreshProcs, cx))
+                            .flex_col()
+                            .when(side_by_side, |s| s.flex_1().min_w(px(0.0)))
+                            .gap_4()
+                            // 快捷操作
                             .child(
                                 div()
-                                    .w(px(220.0))
-                                    .child(self.search_input.clone()),
+                                    .flex_col()
+                                    .p_4()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .bg(theme.panel)
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .text_size(px(14.0))
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .text_color(theme.text)
+                                            .child("快捷操作"),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_wrap()
+                                            .gap_2()
+                                            .child(self.op_button(&theme, "刷新 DNS 缓存", QuickOp::FlushDns, cx))
+                                            .child(self.op_button(&theme, "刷新进程列表", QuickOp::RefreshProcs, cx))
+                                            .child(
+                                                div()
+                                                    .w(px(220.0))
+                                                    .child(self.search_input.clone()),
+                                            ),
+                                    ),
+                            )
+                            // 进程表
+                            .child(
+                                crate::ui::table_container(&theme).child(
+                                    div()
+                                        .id("proc-scroll")
+                                        .flex_col()
+                                        .h(px(400.0))
+                                        .overflow_scroll()
+                                        .child(crate::ui::table_head(&theme, &["PID", "进程名", "内存", "优先级"]))
+                                        .children(procs.iter().map(|p| self.proc_row(&theme, p, cx))),
+                                ),
                             ),
                     ),
-            )
-            // 进程表
-            .child(
-                crate::ui::table_container(&theme).child(
-                    div()
-                        .id("proc-scroll")
-                        .flex_col()
-                        .h(px(380.0))
-                        .overflow_scroll()
-                        .child(crate::ui::table_head(&theme, &["PID", "进程名", "内存", "优先级"]))
-                        .children(procs.iter().map(|p| self.proc_row(&theme, p, cx))),
-                ),
             )
     }
 }

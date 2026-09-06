@@ -129,7 +129,8 @@ impl PiShell {
             .child(self.log_filter_pill(pal, cx, "Info", "Info"))
             .child(self.log_filter_pill(pal, cx, "Warn", "Warn"))
             .child(self.log_filter_pill(pal, cx, "Error", "Error"))
-            // 清空按钮
+            // 清空按钮（用户指令：右侧边栏的 X 按钮 = 清除日志；
+            // 收起/展开由 Main 顶栏的右栏开关控制，本面板头不再放 toggle）
             .child(
                 div()
                     .id("pi-log-clear")
@@ -147,8 +148,6 @@ impl PiShell {
                     })
                     .child(icons::icon(Icon::Close, 13.0).text_color(pal.text_muted)),
             )
-            // 面板开关
-            .child(self.right_toggle_in_strip(pal, cx))
     }
 
     /// 级别筛选 pill（点击切换）
@@ -179,30 +178,6 @@ impl PiShell {
                 });
             })
             .child(SharedString::from(owned_label))
-    }
-
-    fn right_toggle_in_strip(&self, pal: &Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let this = cx.entity();
-        div()
-            .id("pi-right-toggle-strip")
-            .flex()
-            .items_center()
-            .justify_center()
-            .w(px(34.0))
-            .h(px(28.0))
-            .rounded(px(7.0))
-            .cursor_pointer()
-            .text_color(if self.right_open { pal.text } else { pal.text_muted })
-            .bg(if self.right_open {
-                pal.bg_hover
-            } else {
-                super::theme::TRANSPARENT
-            })
-            .hover(|s| s.bg(pal.bg_hover).text_color(pal.text))
-            .on_click(move |_ev, _w, cx| {
-                let _ = this.update(cx, |t, cx| t.toggle_right(cx));
-            })
-            .child(icons::icon(Icon::Panel, 16.0).text_color(if self.right_open { pal.text } else { pal.text_muted }))
     }
 
     /// 日志流主体（滚动行列表；自动跟随最新；点击行复制该条日志）

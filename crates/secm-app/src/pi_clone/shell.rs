@@ -14,7 +14,7 @@ use gpui::{
     div, px, Entity, InteractiveElement, ParentElement, Render, SharedString, Styled, Window,
 };
 use gpui::prelude::*;
-use gpui::{Context, MouseButton, MouseDownEvent, MouseMoveEvent};
+use gpui::Context;
 
 use crate::pages::about::AboutView;
 use crate::pages::ai_environment::AiEnvironmentView;
@@ -567,12 +567,51 @@ impl PiShell {
         let sb_open = self.sidebar_open;
         let sb_width = if mobile { 292.0 } else { self.sidebar_display_w };
 
+        // 分隔条拖拽跟踪：分隔条 on_mouse_down 置 resizing 后，鼠标 move 事件
+        // 由全尺寸 shell 根元素持续接收（指针可离开 12px 分隔条），up 收尾持久化。
+        let drag_entity = cx.entity();
         let mut shell = div()
             .id("pi-app-shell")
             .flex()
             .size_full()
             .overflow_hidden()
-            .bg(pal.bg);
+            .bg(pal.bg)
+            .on_mouse_move(move |event: &gpui::MouseMoveEvent, _w, cx| {
+                let x = event.position.x.into();
+                let _ = drag_entity.update(cx, |t, _| {
+                    if t.sidebar_panel.resizing {
+                        t.sidebar_drag_move(x, GrowDirection::Right);
+                    } else if t.right_panel.resizing {
+                        t.right_drag_move(x, GrowDirection::Left);
+                    }
+                });
+            })
+            .on_mouse_up(gpui::MouseButton::Left, {
+                let drag_entity = cx.entity();
+                move |_ev, _w, cx| {
+                    let _ = drag_entity.update(cx, |t, _| {
+                        if t.sidebar_panel.resizing {
+                            t.sidebar_drag_up();
+                        }
+                        if t.right_panel.resizing {
+                            t.right_drag_up();
+                        }
+                    });
+                }
+            })
+            .on_mouse_up_out(gpui::MouseButton::Left, {
+                let drag_entity = cx.entity();
+                move |_ev, _w, cx| {
+                    let _ = drag_entity.update(cx, |t, _| {
+                        if t.sidebar_panel.resizing {
+                            t.sidebar_drag_up();
+                        }
+                        if t.right_panel.resizing {
+                            t.right_drag_up();
+                        }
+                    });
+                }
+            });
 
         shell = shell.child(self.render_sidebar_column(sb_open, sb_width, mobile, window, cx));
         if !mobile && sb_open && self.sidebar_display_w > 1.0 {
@@ -883,18 +922,6 @@ impl PiShell {
                     let _ = this.update(cx, |t, _| t.sidebar_drag_down(x));
                 }
             },
-            {
-                let this = this.clone();
-                move |x: f32, _w, cx| {
-                    let _ = this.update(cx, |t, _| t.sidebar_drag_move(x, GrowDirection::Right));
-                }
-            },
-            {
-                let this = this.clone();
-                move |_w, cx| {
-                    let _ = this.update(cx, |t, _| t.sidebar_drag_up());
-                }
-            },
         )
     }
 
@@ -909,18 +936,6 @@ impl PiShell {
                     let _ = this.update(cx, |t, _| t.right_drag_down(x));
                 }
             },
-            {
-                let this = this.clone();
-                move |x: f32, _w, cx| {
-                    let _ = this.update(cx, |t, _| t.right_drag_move(x, GrowDirection::Left));
-                }
-            },
-            {
-                let this = this.clone();
-                move |_w, cx| {
-                    let _ = this.update(cx, |t, _| t.right_drag_up());
-                }
-            },
         )
     }
 
@@ -930,13 +945,8 @@ impl PiShell {
         id: &'static str,
         resizing: bool,
         on_down: impl Fn(f32, &mut Window, &mut gpui::App) + 'static,
-        on_move: impl Fn(f32, &mut Window, &mut gpui::App) + 'static,
-        on_up: impl Fn(&mut Window, &mut gpui::App) + 'static,
     ) -> impl IntoElement {
-        use gpui::CursorStyle;
-        let on_up: std::rc::Rc<dyn Fn(&mut Window, &mut gpui::App)> = std::rc::Rc::new(on_up);
-        let up_a = on_up.clone();
-        let up_b = on_up.clone();
+        use gpui::{CursorStyle, InteractiveElement as _, Styled as _};
         let line = if resizing {
             gpui::rgb(0x6e6e73).into()
         } else {
@@ -959,18 +969,21 @@ impl PiShell {
                     .bg(line)
                     .hover(|s| s.bg(gpui::rgb(0x8e8e93))),
             )
-            .on_mouse_down(MouseButton::Left, move |event: &MouseDownEvent, window, cx| {
-                on_down(event.position.x.into(), window, cx);
-            })
-            .on_mouse_move(move |event: &MouseMoveEvent, window, cx| {
-                on_move(event.position.x.into(), window, cx);
-            })
-            .on_mouse_up(MouseButton::Left, move |_ev, window, cx| (up_a)(window, cx))
-            .on_mouse_up_out(MouseButton::Left, move |_ev, window, cx| (up_b)(window, cx))
+            // 按下开始拖拽；后续全局 move/up 由 render_shell 每帧注册的
+            // window.on_mouse_event 跟踪（指针可离开窄分隔条），up 后收尾。
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                move |event: &gpui::MouseDownEvent, window, cx| {
+                    on_down(event.position.x.into(), window, cx);
+                },
+            )
     }
 
     pub fn sidebar_drag_down(&mut self, pointer_x: f32) {
         self.sidebar_panel.begin_drag(pointer_x);
+        if self.sidebar_open {
+            self.sidebar_display_w = self.sidebar_panel.width;
+        }
     }
     pub fn sidebar_drag_move(&mut self, pointer_x: f32, dir: GrowDirection) {
         if self.sidebar_panel.resizing {
@@ -990,6 +1003,9 @@ impl PiShell {
     }
     pub fn right_drag_down(&mut self, pointer_x: f32) {
         self.right_panel.begin_drag(pointer_x);
+        if self.right_open {
+            self.right_display_w = self.right_panel.width;
+        }
     }
     pub fn right_drag_move(&mut self, pointer_x: f32, dir: GrowDirection) {
         if self.right_panel.resizing {

@@ -52,40 +52,28 @@ pub fn default_right_panel_width(viewport_width: f32) -> f32 {
     clamp_width(viewport_width * 0.42, 360.0, 640.0)
 }
 
-/// Sidebar 可拖拽的最大宽度（受中央列保底宽度与右面板占宽约束）
-pub fn sidebar_max_width(
-    viewport_width: f32,
-    right_panel_open: bool,
-    right_panel_width: f32,
-) -> f32 {
+/// Sidebar 可拖拽的最大宽度（只扣右侧栏已占宽度，避免两栏重叠；
+/// Main 自适应伸缩，无独立保底 —— 拉左栏只压缩 Main，右栏不动）
+pub fn sidebar_max_width(viewport_width: f32, right_panel_open: bool, right_panel_width: f32) -> f32 {
     if viewport_width <= MOBILE_MAX_WIDTH {
         return SIDEBAR_MAX_WIDTH;
     }
-    let compact = viewport_width < SPLIT_PANEL_MIN_WIDTH;
-    let main_min_width = if compact {
-        COMPACT_MAIN_MIN_WIDTH
-    } else {
-        DESKTOP_MAIN_MIN_WIDTH
-    };
-    let visible_right = if !compact && right_panel_open {
-        right_panel_width
-    } else {
-        0.0
-    };
+    let visible_right = if right_panel_open { right_panel_width } else { 0.0 };
     (SIDEBAR_MAX_WIDTH)
-        .min(viewport_width - main_min_width - visible_right)
+        .min(viewport_width - visible_right - 24.0)
         .max(SIDEBAR_MIN_WIDTH)
         .round()
 }
 
-/// 右面板可拖拽最大宽度
+/// 右面板可拖拽最大宽度（只扣左侧栏已占宽度，避免两栏重叠；
+/// Main 自适应伸缩 —— 拉右栏只压缩 Main，左栏不动）
 pub fn right_panel_max_width(viewport_width: f32, sidebar_open: bool, sidebar_width: f32) -> f32 {
     if viewport_width < SPLIT_PANEL_MIN_WIDTH {
         return RIGHT_PANEL_MAX_WIDTH;
     }
     let visible_sidebar = if sidebar_open { sidebar_width } else { 0.0 };
     (RIGHT_PANEL_MAX_WIDTH)
-        .min(viewport_width - DESKTOP_MAIN_MIN_WIDTH - visible_sidebar)
+        .min(viewport_width - visible_sidebar - 24.0)
         .max(RIGHT_PANEL_MIN_WIDTH)
         .round()
 }
