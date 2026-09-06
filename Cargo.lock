@@ -5150,7 +5150,7 @@ checksum = "1c107b6f4780854c8b126e228ea8869f4d7b71260f962fefb57b996b8959ba6b"
 
 [[package]]
 name = "secm-app"
-version = "2.3.0"
+version = "2.3.1"
 dependencies = [
  "anyhow",
  "gpui",
@@ -5166,7 +5166,7 @@ dependencies = [
 
 [[package]]
 name = "secm-core"
-version = "2.3.0"
+version = "2.3.1"
 dependencies = [
  "chrono",
  "encoding_rs",
@@ -5184,7 +5184,7 @@ dependencies = [
 
 [[package]]
 name = "secm-datasource"
-version = "2.3.0"
+version = "2.3.1"
 dependencies = [
  "log",
  "serde",
