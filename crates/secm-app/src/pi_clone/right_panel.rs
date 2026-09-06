@@ -207,6 +207,7 @@ impl PiShell {
                 div()
                     .id(SharedString::from(format!("pi-log-row-{ix}-{}", e.level)))
                     .flex()
+                    .flex_shrink_0()
                     .items_start()
                     .gap(px(6.0))
                     .px(px(8.0))
@@ -279,6 +280,13 @@ impl PiShell {
                     .scrollbar_width(px(0.0))
                     .pr(px(6.0))
                     .track_scroll(&scroll)
+                    // 滚轮滚动后触发重绘，让自绘 thumb 跟随最新 offset
+                    .on_scroll_wheel({
+                        let this = cx.entity();
+                        move |_ev: &gpui::ScrollWheelEvent, _w, cx| {
+                            let _ = this.update(cx, |_, cx| cx.notify());
+                        }
+                    })
                     .bg(pal.bg)
                     .when(rows.is_empty(), |s| {
                         s.child(
@@ -325,7 +333,12 @@ impl PiShell {
                                 .top(px(thumb_top))
                                 .h(px(thumb_h))
                                 .rounded_full()
-                                .bg(if scrollable { pal_ref.scroll_thumb } else { pal_ref.bg_hover })
+                                // 常显高对比 thumb（solid 灰），确保可见
+                                .bg(if scrollable {
+                                    gpui::rgb(0x6e6e73)
+                                } else {
+                                    gpui::rgb(0x2c2c2e)
+                                })
                                 .cursor_pointer()
                                 .on_mouse_down(gpui::MouseButton::Left, {
                                     let this = cx.entity();

@@ -206,9 +206,13 @@ impl PiShell {
             let drop = self.log_rows.len() - super::right_panel::KEEP_LINES;
             self.log_rows.drain(..drop);
         }
-        // 新日志到达 → 流式跟随最新（最新在顶部第一条，滚动置顶）
+        // 流式跟随策略：仅当用户停留在顶部（正在看最新日志）时才把新日志置顶；
+        // 若用户已向下滚动查看旧日志，则不打断（避免每 500ms 被强制拉回顶部）。
         if let Some(h) = self.log_scroll.as_ref() {
-            h.scroll_to_top_of_item(0);
+            let offset_y = f32::from(h.offset().y);
+            if offset_y >= -4.0 {
+                h.scroll_to_top_of_item(0);
+            }
         }
         cx.notify();
     }
