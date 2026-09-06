@@ -39,6 +39,12 @@ fn main() {
         let _ = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                // 窗口标题（任务栏/Alt-Tab 来源）；appears_transparent 保持自绘无边框
+                titlebar: Some(gpui::TitlebarOptions {
+                    title: Some("SysEnv Console Manager".into()),
+                    appears_transparent: true,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             |window, cx| {

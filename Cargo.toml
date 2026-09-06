@@ -7,10 +7,10 @@ members = [
 ]
 
 [workspace.package]
-version = "2.6.0"
+version = "2.7.0"
 edition = "2021"
 license = "MIT"
-authors = ["SECM Team"]
+authors = ["SysEnv Console Manager"]
 repository = "https://github.com/youridol/sysenv-console-manager"
 
 [workspace.dependencies]

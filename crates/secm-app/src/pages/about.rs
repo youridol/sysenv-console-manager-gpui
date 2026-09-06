@@ -98,7 +98,7 @@ impl Render for AboutView {
                 div()
                     .text_size(px(11.0))
                     .text_color(theme.text_muted)
-                    .child("架构决策见 docs/adr/ · 功能基准见 docs/spec/ · MIT © 2026 SECM Team"),
+                    .child("架构决策见 docs/adr/ · 功能基准见 docs/spec/ · MIT © 2026 SysEnv Console Manager"),
             )
     }
 }

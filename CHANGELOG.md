@@ -1,5 +1,15 @@
 # 更新日志
 
+## [v2.7.0] - 2026-09-06
+### 变更（MINOR：统一产品名 SysEnv Console Manager + 补齐窗口标题/图标）
+- **产品名统一全称 SysEnv Console Manager**：侧栏品牌行、Main 顶栏标题、
+  关于页名称与版权署名、窗口标题、托盘 tooltip 全部用全称（SECM 简写仅保留于
+  工程内部命名 secm-app/core/datasource 与存储目录）
+- **补齐任务栏/窗口标题**：此前无 titlebar 配置导致任务栏与 Alt-Tab 无标题；
+  现 WindowOptions.titlebar.title = "SysEnv Console Manager"（appears_transparent
+  保持自绘无边框）——实测 GetWindowText = 全称
+- **右栏标题图标增强**：日志流标题 Terminal 图标提升为 accent 高亮色
+
 ## [v2.6.0] - 2026-09-06
 ### 修复+变更（MINOR：日志清空修复 + 清理优化页现代化排版）
 - **修复日志清理无效**：点 X(清除日志) 只清了 UI 列表、未清全局 LogBuffer 环形

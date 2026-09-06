@@ -115,7 +115,7 @@ impl PiShell {
                     .gap(px(6.0))
                     .flex_1()
                     .min_w(px(0.0))
-                    .child(icons::icon(Icon::Terminal, 14.0).text_color(pal.text_muted))
+                    .child(icons::icon(Icon::Terminal, 15.0).text_color(pal.accent))
                     .child(
                         div()
                             .text_size(px(13.0))

@@ -1089,7 +1089,7 @@ impl PiShell {
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(pal.text)
                                     .truncate()
-                                    .child(SharedString::from("SECM — 系统环境管理器")),
+                                    .child(SharedString::from("SysEnv Console Manager")),
                             )
                             .child(
                                 div()

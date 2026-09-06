@@ -59,7 +59,7 @@ impl PiShell {
                     .h(px(34.0))
                     .px(px(4.0))
                     .gap(px(4.0))
-                    // 可拖动标题区（logo + SECM + 弹性空白），占满到按钮前
+                    // 可拖动标题区（logo + 全称 + 弹性空白），占满到按钮前
                     // 无标题栏：按下时发起系统窗口拖动
                     .child(
                         div()
@@ -82,10 +82,13 @@ impl PiShell {
                             )
                             .child(
                                 div()
-                                    .text_size(px(13.5))
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .truncate()
+                                    .text_size(px(11.5))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(pal.text)
-                                    .child(SharedString::from("SECM")),
+                                    .child(SharedString::from("SysEnv Console Manager")),
                             ),
                     )
                     .child(self.chrome_theme_button(pal, cx))
