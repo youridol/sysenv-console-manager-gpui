@@ -32,7 +32,7 @@ impl Theme {
     pub fn dark() -> Self {
         Self {
             bg: rgba(0x0f1015),            // 近似 zinc-950
-            panel: rgba(0x1a1c25),         // 卡片/面板
+            panel: rgba(0x242426),         // 卡片/面板 —— 对齐克隆壳侧栏 bg_panel（#242426，用户指令：卡片取侧栏色）
             panel_hover: rgba(0x242736),
             border: rgba(0x2e3348),
             text: rgba(0xe8eaf2),

@@ -47,6 +47,14 @@ pub struct PiShell {
     pub file_tabs: Vec<FileTab>,
     pub active_file_tab_id: Option<String>,
     pub pages: PageEntities,
+    /// 侧栏底部「本机 IP」卡数据（首个 Up 网卡 IPv4；None = 未取到/未连接）
+    pub local_ip: Option<String>,
+    /// IP 卡读取中（后台枚举未回）
+    pub ip_loading: bool,
+    /// 侧栏网络信息卡数据（6 字段 + 上下行速率）
+    pub net_info: Option<secm_core::net_info::NetInfo>,
+    /// 网络信息卡读取中（后台采集未回）
+    pub net_info_loading: bool,
 }
 
 /// 11 页实体 + 可见性标志（dashboard/logs 轮询门控）
@@ -117,10 +125,36 @@ impl PiShell {
             file_tabs: vec![],
             active_file_tab_id: None,
             pages: PageEntities::new(),
+            local_ip: None,
+            ip_loading: false,
+            net_info: None,
+            net_info_loading: false,
 
         };
         this.ensure_page(SecmPage::Dashboard, cx);
+        this.refresh_local_ip(cx);
+        this.refresh_net_info(cx);
+        this.start_net_rate_poll(cx);
         this
+    }
+
+    /// 启动侧栏网络速率周期刷新（1s；PDH 需要 ≥1s 间隔累积样本）。
+    /// 仅刷新本地链路字段（无网络请求），驱动上下行速率滚动。
+    fn start_net_rate_poll(&self, cx: &mut Context<Self>) {
+        let weak = cx.entity().downgrade();
+        cx.spawn(async move |_this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+            let mut tick = gpui::Timer::after(std::time::Duration::from_secs(1));
+            loop {
+                tick.await;
+                if let Some(shell) = weak.upgrade() {
+                    shell
+                        .update(cx, |t, cx| t.refresh_net_rate(cx))
+                        .ok();
+                }
+                tick = gpui::Timer::after(std::time::Duration::from_secs(1));
+            }
+        })
+        .detach();
     }
 
     pub fn palette(&self) -> Palette {
@@ -150,6 +184,102 @@ impl PiShell {
             self.right_display_w = self.right_panel.width;
         }
         cx.notify();
+    }
+
+    /// 后台读取本机首个 Up 网卡 IPv4（GetAdaptersAddresses，不阻塞主线程）。
+    /// 供侧栏底部 IP 卡展示；点击卡片可再次调用刷新。
+    pub fn refresh_local_ip(&mut self, cx: &mut Context<Self>) {
+        if self.ip_loading {
+            return;
+        }
+        self.ip_loading = true;
+        cx.notify();
+
+        let weak: gpui::WeakEntity<Self> = cx.entity().downgrade();
+        cx.spawn(async move |_this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+            let exec = cx.background_executor().clone();
+            let adapters = exec
+                .spawn(async move { secm_core::netif::list_adapters().unwrap_or_default() })
+                .await;
+            // 首个 Up 适配器的第一个 IPv4；无 Up 或空则显示「未连接」
+            let ip = adapters
+                .iter()
+                .find(|a| a.status == "Up")
+                .and_then(|a| a.ipv4.first())
+                .cloned();
+            if let Some(shell) = weak.upgrade() {
+                shell.update(cx, |this, cx| {
+                    this.ip_loading = false;
+                    this.local_ip = ip;
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// 后台采集侧栏「网络信息」全量数据（速率/本地 v4/公网 4 槽，见 net_info）。
+    /// PDH 速率需 ≥1s 间隔自然累积：首次调用建立基线，此后每次刷新拿到最近 ~1s 均值。
+    pub fn refresh_net_info(&mut self, cx: &mut Context<Self>) {
+        if self.net_info_loading {
+            return;
+        }
+        self.net_info_loading = true;
+        cx.notify();
+
+        let weak: gpui::WeakEntity<Self> = cx.entity().downgrade();
+        cx.spawn(async move |_this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+            let exec = cx.background_executor().clone();
+            let info = exec
+                .spawn(async move { secm_core::net_info::collect_net_info() })
+                .await;
+            if let Some(shell) = weak.upgrade() {
+                shell.update(cx, |this, cx| {
+                    this.net_info_loading = false;
+                    this.net_info = Some(info);
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// 后台轻量刷新本地链路字段（协商速率/本地 IPv4/实时上下行速率，无网络请求）。
+    /// 由侧栏周期任务每秒调用，驱动 PDH 速率滚动；保留既有公网槽。
+    pub fn refresh_net_rate(&mut self, cx: &mut Context<Self>) {
+        if self.net_info_loading {
+            return;
+        }
+        // 首次尚未建立数据 → 走全量（含公网）
+        let Some(current) = self.net_info.clone() else {
+            return self.refresh_net_info(cx);
+        };
+        self.net_info_loading = true;
+        cx.notify();
+
+        let weak: gpui::WeakEntity<Self> = cx.entity().downgrade();
+        cx.spawn(async move |_this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+            let exec = cx.background_executor().clone();
+            // 后台克隆一份做本地刷新（不动主线程共享数据）
+            let mut next = current;
+            let updated = exec
+                .spawn(async move {
+                    secm_core::net_info::refresh_local_rate(&mut next);
+                    next
+                })
+                .await;
+            if let Some(shell) = weak.upgrade() {
+                shell.update(cx, |this, cx| {
+                    this.net_info_loading = false;
+                    this.net_info = Some(updated);
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     /// 切页：停旧页轮询、启新页，懒构造新页实体
@@ -402,22 +532,25 @@ impl PiShell {
         let pal = self.palette();
         let inner_w = if mobile { 292.0 } else { self.sidebar_panel.width };
 
-        // 内层内容仅 header + 导航；底部工具条(footer)由本函数统一置底渲染一份，
-        // 避免与导航尾部（关于分组下方）重复出现。pb(40) 为 footer 预留空间。
-        let content = div()
-            .w(px(inner_w))
-            .h_full()
-            .pb(px(40.0))
-            .child(self.render_sidebar_inner(window, cx));
-
-        // Footer 钉在侧栏最底（absolute 于容器底部），桌面/移动抽屉共用同一份
-        let footer = div()
+        // 侧栏固定底部区（absolute 钉底）：本机 IP 卡 + 底部工具条(footer)，
+        // 均不随导航滚动；与导航列表尾部不重复。
+        // 预留高度：IP 卡 ~58 + footer ~40。
+        let fixed = div()
             .absolute()
             .left_0()
             .right_0()
             .bottom_0()
             .w(px(inner_w))
+            .flex_col()
+            .child(self.local_ip_card(&pal, cx))
             .child(self.sidebar_footer(&pal, cx));
+
+        // 内层内容仅 header + 导航；pb 预留给底部固定区（IP 卡 + footer）
+        let content = div()
+            .w(px(inner_w))
+            .h_full()
+            .pb(px(210.0))
+            .child(self.render_sidebar_inner(window, cx));
 
         if mobile {
             return div()
@@ -434,7 +567,7 @@ impl PiShell {
                 .border_r_1()
                 .border_color(pal.separator)
                 .child(content)
-                .child(footer)
+                .child(fixed)
                 .when(!open, |s| s.hidden())
                 .into_any_element();
         }
@@ -451,8 +584,202 @@ impl PiShell {
             .border_r_1()
             .border_color(pal.separator)
             .child(content)
-            .child(footer)
+            .child(fixed)
             .into_any_element()
+    }
+
+    /// 侧栏底部「网络信息」卡（固定于 footer 上方；点击重新读取）。
+    ///
+    /// 复原旧版侧栏网络信息检测（用户指令 2026-09-06）：已连接网卡上下行速率 +
+    /// 协商速率 + 本地 IPv4 + 公网 4 槽（国内/国外 × IPv4/IPv6）。数据来自
+    /// secm_core::net_info（后台采集，见 refresh_net_info）。
+    fn local_ip_card(&self, pal: &Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let this = cx.entity();
+        let loading = self.net_info_loading;
+        let ni = self.net_info.clone().unwrap_or_default();
+        // 降级标题：卡片下方展示本地 IPv4（兼容旧「本机 IP」语义）
+        let local_v4 = if ni.local_ipv4.is_empty() {
+            self.local_ip.clone().unwrap_or_default()
+        } else {
+            ni.local_ipv4.clone()
+        };
+
+        // 格式化函数：KB/s → 人类可读
+        fn fmt_rate(kbps: f32) -> String {
+            if kbps < 0.1 {
+                "0 KB/s".to_string()
+            } else if kbps < 1024.0 {
+                format!("{:.0} KB/s", kbps)
+            } else {
+                format!("{:.2} MB/s", kbps / 1024.0)
+            }
+        }
+
+        // 公网槽 label 值对（行标签含区域；值=IP 或「—」；后缀=失败标）
+        let pub_rows: Vec<(String, String, String)> = vec![
+            (
+                "公网 v4 · 国内".into(),
+                label_ip(&ni.pub_v4_domestic),
+                fail_of(&ni.pub_v4_domestic),
+            ),
+            (
+                "公网 v4 · 国外".into(),
+                label_ip(&ni.pub_v4_abroad),
+                fail_of(&ni.pub_v4_abroad),
+            ),
+            (
+                "公网 v6 · 国内".into(),
+                label_ip(&ni.pub_v6_domestic),
+                fail_of(&ni.pub_v6_domestic),
+            ),
+            (
+                "公网 v6 · 国外".into(),
+                label_ip(&ni.pub_v6_abroad),
+                fail_of(&ni.pub_v6_abroad),
+            ),
+        ];
+
+        div()
+            .id("pi-sidebar-net-card")
+            .mx(px(8.0))
+            .mb(px(4.0))
+            .px(px(10.0))
+            .py(px(8.0))
+            .rounded(px(9.0))
+            .border_1()
+            .border_color(pal.separator)
+            .bg(pal.surface_muted)
+            .cursor_pointer()
+            .on_click(move |_ev, _w, cx| {
+                let _ = this.update(cx, |t, cx| t.refresh_net_info(cx));
+            })
+            // 头部：网卡名 + 协商速率 + 上下行
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .child(
+                        icons::icon(Icon::Wifi, 12.0).text_color(if ni.adapter_name.is_empty() {
+                            pal.text_dim
+                        } else {
+                            pal.success
+                        }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .truncate()
+                            .text_size(px(10.5))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(pal.text_muted)
+                            .child(SharedString::from(if loading {
+                                "读取中…".to_string()
+                            } else if ni.adapter_name.is_empty() {
+                                "未连接".to_string()
+                            } else {
+                                format!("{} · {}", ni.adapter_name, ni.link_speed)
+                            })),
+                    ),
+            )
+            // 上下行速率行
+            .child(
+                div()
+                    .mt(px(4.0))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(self.rate_pill(pal, "↓ 下行".into(), fmt_rate(ni.rate.rx_kbps)))
+                    .child(self.rate_pill(pal, "↑ 上行".into(), fmt_rate(ni.rate.tx_kbps))),
+            )
+            // 本地 IPv4
+            .child(
+                div()
+                    .mt(px(5.0))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(9.5))
+                            .text_color(pal.text_dim)
+                            .child(SharedString::from("本地 IPv4")),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(pal.text)
+                            .child(SharedString::from(if local_v4.is_empty() {
+                                "—".to_string()
+                            } else {
+                                local_v4
+                            })),
+                    ),
+            )
+            // 公网 4 槽
+            .children(pub_rows.into_iter().map(|(k, v, d)| {
+                div()
+                    .mt(px(2.0))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(9.5))
+                            .text_color(pal.text_dim)
+                            .child(SharedString::from(k)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .min_w(px(0.0))
+                            .child(
+                                div()
+                                    .max_w(px(130.0))
+                                    .truncate()
+                                    .text_size(px(10.5))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(if v == "—" { pal.text_dim } else { pal.text })
+                                    .child(SharedString::from(v.clone())),
+                            )
+                            .when(!d.is_empty(), |s| {
+                                s.child(
+                                    div()
+                                        .text_size(px(9.0))
+                                        .text_color(pal.danger)
+                                        .child(SharedString::from(d.clone())),
+                                )
+                            }),
+                    )
+            }))
+            .into_any_element()
+    }
+
+    /// 上下行速率小标签（等宽两列展示）
+    fn rate_pill(&self, pal: &Palette, label: String, value: String) -> impl IntoElement {
+        div()
+            .flex_1()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .child(
+                div()
+                    .text_size(px(9.5))
+                    .text_color(pal.text_dim)
+                    .child(SharedString::from(label)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(11.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(pal.text)
+                    .child(SharedString::from(value)),
+            )
     }
 
     fn render_sidebar_divider(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -784,6 +1111,26 @@ impl PiShell {
 impl Render for PiShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.render_shell(window, cx)
+    }
+}
+
+// ── 侧栏网络信息卡：公网槽格式化辅助 ──
+
+/// 公网槽展示值：槽内有 IP 显示 "IP"，槽空显示 "—"
+fn label_ip(e: &secm_core::net_info::PublicIpEntry) -> String {
+    if e.ip.is_empty() {
+        "—".to_string()
+    } else {
+        e.ip.clone()
+    }
+}
+
+/// 公网槽失败标：取数失败显示「失败」，成功为空
+fn fail_of(e: &secm_core::net_info::PublicIpEntry) -> String {
+    if !e.diag.is_empty() {
+        "失败".to_string()
+    } else {
+        String::new()
     }
 }
 

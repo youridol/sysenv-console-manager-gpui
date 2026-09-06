@@ -31,6 +31,7 @@ pub mod dns;
 pub mod disk;
 pub mod disk_io;
 pub mod error;
+pub mod net_io;
 pub mod netif;
 pub mod power;
 pub mod registry;
