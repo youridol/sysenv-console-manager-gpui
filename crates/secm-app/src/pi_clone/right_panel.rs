@@ -181,7 +181,7 @@ impl PiShell {
     }
 
     /// 日志流主体（滚动行列表；**最新日志在第一条**（倒序渲染）；点击行复制该条日志）
-    fn log_stream(&mut self, pal: &Palette, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn log_stream(&mut self, pal: &Palette, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let level = self.log_filter_level.clone();
         // 倒序：日志行按新→旧排列，最新条目显示在顶部第一条
         let rows: Vec<gpui::AnyElement> = self
@@ -251,6 +251,7 @@ impl PiShell {
                     .into_any_element()
             })
             .collect();
+        let row_count = rows.len();
 
         // 滚动句柄（懒创建并持有；track_scroll 要求 stateful div）
         if self.log_scroll.is_none() {
@@ -258,28 +259,105 @@ impl PiShell {
         }
         let scroll = self.log_scroll.clone().expect("已建");
 
+        // 自绘滚动条几何（GPUI Windows 不绘制系统滚动条，需自绘）：
+        // 依据 ScrollHandle 的 offset / max_offset / bounds 计算 thumb 位置与高度。
+        let (thumb_top, thumb_h, scrollable) = scrollbar_geometry(&scroll);
+
         div()
-            .id("pi-log-stream")
+            .id("pi-log-stream-wrap")
+            .relative()
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
-            .overflow_y_scroll()
-            .scrollbar_width(px(8.0))
-            .track_scroll(&scroll)
-            .bg(pal.bg)
-            .when(rows.is_empty(), |s| {
+            .child(
+                div()
+                    .id("pi-log-stream")
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .overflow_y_scroll()
+                    .scrollbar_width(px(0.0))
+                    .pr(px(6.0))
+                    .track_scroll(&scroll)
+                    .bg(pal.bg)
+                    .when(rows.is_empty(), |s| {
+                        s.child(
+                            div()
+                                .flex_col()
+                                .items_center()
+                                .justify_center()
+                                .h_full()
+                                .gap(px(6.0))
+                                .text_size(px(11.5))
+                                .text_color(pal.text_dim)
+                                .child(SharedString::from("暂无日志")),
+                        )
+                    })
+                    .children(rows),
+            )
+            // 自绘滚动条（track + thumb；thumb 可拖）
+            .when(row_count > 3, |s| {
+                let pal_ref = *pal;
                 s.child(
                     div()
-                        .flex_col()
-                        .items_center()
-                        .justify_center()
-                        .h_full()
-                        .gap(px(6.0))
-                        .text_size(px(11.5))
-                        .text_color(pal.text_dim)
-                        .child(SharedString::from("暂无日志")),
+                        .id("pi-log-scrollbar")
+                        .absolute()
+                        .top_0()
+                        .right_0()
+                        .bottom_0()
+                        .w(px(10.0))
+                        .child(
+                            div()
+                                .id("pi-log-sb-track")
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .w(px(10.0))
+                                .rounded_full()
+                                .hover(|s| s.bg(pal_ref.bg_hover)),
+                        )
+                        .child(
+                            div()
+                                .id("pi-log-sb-thumb")
+                                .absolute()
+                                .left(px(2.0))
+                                .w(px(6.0))
+                                .top(px(thumb_top))
+                                .h(px(thumb_h))
+                                .rounded_full()
+                                .bg(if scrollable { pal_ref.scroll_thumb } else { pal_ref.bg_hover })
+                                .cursor_pointer()
+                                .on_mouse_down(gpui::MouseButton::Left, {
+                                    let this = cx.entity();
+                                    move |ev: &gpui::MouseDownEvent, _w, cx| {
+                                        let py: f32 = ev.position.y.into();
+                                        let _ = this.update(cx, |t, cx| {
+                                            t.log_sb_thumb_down(py);
+                                            cx.notify();
+                                        });
+                                    }
+                                }),
+                        ),
                 )
             })
-            .children(rows)
     }
+}
+
+/// 由 ScrollHandle 计算自绘滚动条 thumb 几何（GPUI Windows 无系统滚动条绘制）
+fn scrollbar_geometry(scroll: &gpui::ScrollHandle) -> (f32, f32, bool) {
+    let viewport = f32::from(scroll.bounds().size.height);
+    let max_off = f32::from(scroll.max_offset().height); // 负值：可向上滚动的量
+    if viewport <= 0.0 || max_off >= 0.0 {
+        return (0.0, 0.0, false);
+    }
+    let content = viewport + max_off.abs();
+    let track = viewport;
+    let thumb_h = (track * (viewport / content)).clamp(24.0, track);
+    let ratio = if max_off.abs() > 0.0 {
+        (-f32::from(scroll.offset().y)) / max_off.abs()
+    } else {
+        0.0
+    };
+    let thumb_top = (track - thumb_h) * ratio;
+    (thumb_top, thumb_h, true)
 }

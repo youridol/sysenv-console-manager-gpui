@@ -51,6 +51,8 @@ pub struct PiShell {
     pub log_filter_level: String,
     /// 日志流滚动句柄（新行到达自动滚到底）
     pub log_scroll: Option<gpui::ScrollHandle>,
+    /// 日志流自绘滚动条拖拽状态：Some((按下时指针 y, 按下时 offset y))
+    pub log_sb_drag: Option<(f32, f32)>,
     /// 侧栏底部「本机 IP」卡数据（首个 Up 网卡 IPv4；None = 未取到/未连接）
     pub local_ip: Option<String>,
     /// IP 卡读取中（后台枚举未回）
@@ -129,6 +131,7 @@ impl PiShell {
             log_rows: Vec::new(),
             log_filter_level: String::new(),
             log_scroll: None,
+            log_sb_drag: None,
             local_ip: None,
             ip_loading: false,
             net_info: None,
@@ -584,11 +587,15 @@ impl PiShell {
             .bg(pal.bg)
             .on_mouse_move(move |event: &gpui::MouseMoveEvent, _w, cx| {
                 let x = event.position.x.into();
+                let y: f32 = event.position.y.into();
                 let _ = drag_entity.update(cx, |t, _| {
                     if t.sidebar_panel.resizing {
                         t.sidebar_drag_move(x, GrowDirection::Right);
                     } else if t.right_panel.resizing {
                         t.right_drag_move(x, GrowDirection::Left);
+                    } else if let Some((start_py, start_ratio)) = t.log_sb_drag {
+                        // 日志流自绘滚动条 thumb 拖动
+                        t.log_sb_drag_move(y, start_py, start_ratio);
                     }
                 });
             })
@@ -602,6 +609,7 @@ impl PiShell {
                         if t.right_panel.resizing {
                             t.right_drag_up();
                         }
+                        t.log_sb_drag = None;
                     });
                 }
             })
@@ -615,6 +623,7 @@ impl PiShell {
                         if t.right_panel.resizing {
                             t.right_drag_up();
                         }
+                        t.log_sb_drag = None;
                     });
                 }
             });
@@ -1028,6 +1037,44 @@ impl PiShell {
                 self.right_display_w = self.right_panel.width;
             }
         }
+    }
+
+    /// 日志流自绘滚动条 thumb 拖动换算（shell 全局 move 回调）。
+    /// start_py/start_ratio = 按下时记录的 (指针窗口 y, offset 占比)；
+    /// 依据拖动位移更新 ScrollHandle offset。
+    fn log_sb_drag_move(&mut self, pointer_y: f32, start_py: f32, start_ratio: f32) {
+        let Some(handle) = self.log_scroll.clone() else {
+            return;
+        };
+        let viewport = f32::from(handle.bounds().size.height);
+        let max_off = f32::from(handle.max_offset().height);
+        if viewport <= 0.0 || max_off >= 0.0 {
+            return;
+        }
+        let content = viewport + max_off.abs();
+        let thumb_h = (viewport * (viewport / content)).clamp(24.0, viewport);
+        let track = viewport;
+        let dy = pointer_y - start_py;
+        let ratio = (start_ratio + dy / (track - thumb_h).max(1.0)).clamp(0.0, 1.0);
+        let new_off = -(ratio * max_off.abs());
+        handle.set_offset(gpui::point(gpui::px(0.0), gpui::px(new_off)));
+    }
+
+    /// 日志流滚动条 thumb 按下：记录起点供全局 move 换算（ratio = 当前 offset 占比）
+    pub fn log_sb_thumb_down(&mut self, pointer_y: f32) {
+        let ratio = match self.log_scroll.clone() {
+            Some(handle) => {
+                let viewport = f32::from(handle.bounds().size.height);
+                let max_off = f32::from(handle.max_offset().height);
+                if viewport > 0.0 && max_off < 0.0 {
+                    (-f32::from(handle.offset().y)) / max_off.abs()
+                } else {
+                    0.0
+                }
+            }
+            None => 0.0,
+        };
+        self.log_sb_drag = Some((pointer_y, ratio));
     }
 
     fn render_main(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

@@ -1,5 +1,16 @@
 # 更新日志
 
+## [v2.8.1] - 2026-09-06
+### 修复（PATCH：右侧日志流自绘滚动条）
+- **根因**：GPUI 0.2 Windows 平台不绘制任何滚动条（`scrollbar_width` 仅预留布局
+  空间、无渲染实现）——上一版设置的 8px scrollbar_width 只留白、滚动条仍不可见
+- **修复**：日志流容器右侧叠加**自绘滚动条**（absolute track + thumb）：
+  - thumb 高度/位置由 `ScrollHandle` 的 bounds/max_offset/offset 实时换算
+  - thumb 可拖动（记录按下点 → 全局 move 换算 offset → set_offset），
+    滚动条 thumb 拖动走分隔条同款 shell 根 on_mouse_move/up 全局跟踪
+  - 颜色用 palette.scroll_thumb，thumb 圆角胶囊样式
+- 日志行数 <3 时滚动条自动隐藏
+
 ## [v2.8.0] - 2026-09-06
 ### 修复+变更（MINOR：日志滚动条/最新优先排序 + 全链路行为打点补全）
 - **日志流显示滚动条**：GPUI scrollbar_width 默认 0（Scroll 等同 Hidden、滚动条不可见），
