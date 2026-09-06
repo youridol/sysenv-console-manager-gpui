@@ -60,6 +60,7 @@ pub struct AiEnvironmentView {
 
 impl AiEnvironmentView {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        log::info!("AI 环境 · 页面已打开");
         let mut v = Self {
             npm: None,
             npm_loading: false,
@@ -126,6 +127,18 @@ impl AiEnvironmentView {
                     }
                 })
                 .await;
+
+            // UI 侧日志：各组检测完成（仅一次，不逐条）
+            match &result {
+                DetectOutcome::Npm(n) => log::info!(
+                    "AI 环境 · npm 检测完成（可用: {}，全局包 {} 个）",
+                    n.available,
+                    n.global_packages
+                ),
+                DetectOutcome::Tools(t) => log::info!("AI 环境 · AI 工具检测完成，共 {} 项", t.len()),
+                DetectOutcome::Mcp(m) => log::info!("AI 环境 · MCP 服务器检测完成，共 {} 项", m.len()),
+                DetectOutcome::Ext(e) => log::info!("AI 环境 · Skills 扩展扫描完成，共 {} 项", e.len()),
+            }
 
             if let Some(view) = weak.upgrade() {
                 view.update(cx, |this, cx| {

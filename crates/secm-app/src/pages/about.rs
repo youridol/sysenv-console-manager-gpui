@@ -9,6 +9,7 @@ pub struct AboutView;
 
 impl AboutView {
     pub fn new() -> Self {
+        log::info!("关于 · 页面已打开（v{}）", env!("CARGO_PKG_VERSION"));
         Self
     }
 }

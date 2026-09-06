@@ -41,6 +41,7 @@ pub struct EnvironmentView {
 
 impl EnvironmentView {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        log::info!("环境检测 · 页面已打开");
         let mut v = Self {
             system: None,
             dx: None,
@@ -125,6 +126,8 @@ impl EnvironmentView {
 
     /// 全页重新检测（两组各自后台并发）
     fn rescan(&mut self, cx: &mut Context<Self>) {
+        // UI 侧日志：用户点击重新检测
+        log::info!("环境检测 · 触发重新检测");
         self.start_static_load(cx);
         self.run_ai_check(cx);
         cx.notify();
@@ -139,6 +142,8 @@ impl EnvironmentView {
         let preset_name = preset.name.clone();
         let preset_clone = preset.clone();
         self.status = format!("正在应用「{}」预设…", preset.name);
+        // UI 侧日志：用户点击一键套用预设
+        log::info!("环境检测 · 触发套用「{}」游戏预设", preset.name);
         cx.notify();
 
         let weak: WeakEntity<Self> = cx.entity().downgrade();
@@ -166,6 +171,17 @@ impl EnvironmentView {
                             outcome.failures.len(),
                             outcome.failures.join("；")
                         ));
+                    }
+                    // UI 侧日志：预设套用结果（有失败项 → warn）
+                    if outcome.failures.is_empty() {
+                        log::info!("环境检测 · 套用「{}」预设完成", preset_name);
+                    } else {
+                        log::warn!(
+                            "环境检测 · 套用「{}」预设部分失败（{} 项）: {}",
+                            preset_name,
+                            outcome.failures.len(),
+                            outcome.failures.join("；")
+                        );
                     }
                     this.status = msg;
                     cx.notify();

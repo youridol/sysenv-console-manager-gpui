@@ -7,7 +7,7 @@
 
 use super::icons::Icon;
 
-/// SECM 工具页枚举（对齐原 app.rs Page，顺序不变）
+/// SECM 工具页枚举（对齐原 app.rs Page，顺序不变；调试日志已迁右栏日志流面板，不再占导航）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecmPage {
     Dashboard,
@@ -19,7 +19,6 @@ pub enum SecmPage {
     Environment,
     AiEnvironment,
     Hardware,
-    Logs,
     About,
 }
 
@@ -34,7 +33,6 @@ impl SecmPage {
         SecmPage::Environment,
         SecmPage::AiEnvironment,
         SecmPage::Hardware,
-        SecmPage::Logs,
         SecmPage::About,
     ];
 
@@ -49,7 +47,6 @@ impl SecmPage {
             Self::Environment => "环境检测",
             Self::AiEnvironment => "AI 环境",
             Self::Hardware => "硬件检测",
-            Self::Logs => "调试日志",
             Self::About => "关于",
         }
     }
@@ -66,7 +63,6 @@ impl SecmPage {
             Self::Environment => Icon::Box,
             Self::AiEnvironment => Icon::Cpu,
             Self::Hardware => Icon::HardDrive,
-            Self::Logs => Icon::Terminal,
             Self::About => Icon::Info,
         }
     }
@@ -103,7 +99,7 @@ impl NavGroup {
                     | SecmPage::AiEnvironment
                     | SecmPage::Hardware
             ),
-            Self::System => matches!(page, SecmPage::Logs | SecmPage::About),
+            Self::System => matches!(page, SecmPage::About),
         }
     }
 }

@@ -42,6 +42,7 @@ impl ServicesView {
             op_busy: false,
             search_input,
         };
+        log::info!("服务管理 · 页面已打开");
         v.start_load(cx);
         v
     }
@@ -60,6 +61,8 @@ impl ServicesView {
             let services = exec
                 .spawn(async move { settings::list_all_services().unwrap_or_default() })
                 .await;
+            // UI 侧日志：服务枚举完成（记录枚举到的数量）
+            log::info!("服务管理 · 服务枚举完成，共 {} 个服务", services.len());
             if let Some(view) = weak.upgrade() {
                 view.update(cx, |this, cx| {
                     this.loading = false;
@@ -129,7 +132,9 @@ impl ServicesView {
 
         let weak: WeakEntity<Self> = cx.entity().downgrade();
         let name_c = name.to_string();
+        let name_log = name_c.clone();
         let op_c = op;
+        let op_label = op.label().to_string();
         cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
             let exec = cx.background_executor().clone();
             let result = exec
@@ -149,6 +154,11 @@ impl ServicesView {
                     }
                 })
                 .await;
+            // UI 侧日志：服务启停/启动类型操作结果
+            match &result {
+                Ok(msg) => log::info!("服务管理 · 已{}服务 {}：{}", op_label, name_log, msg),
+                Err(e) => log::warn!("服务管理 · {}服务 {} 失败: {}", op_label, name_log, e),
+            }
             if let Some(view) = weak.upgrade() {
                 view.update(cx, |this, cx| {
                     this.op_busy = false;

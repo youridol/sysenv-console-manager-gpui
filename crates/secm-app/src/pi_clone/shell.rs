@@ -22,18 +22,18 @@ use crate::pages::cleanup::CleanupView;
 use crate::pages::dashboard::DashboardView;
 use crate::pages::environment::EnvironmentView;
 use crate::pages::hardware::HardwareView;
-use crate::pages::logs::LogsView;
 use crate::pages::net_config::NetConfigView;
 use crate::pages::network::NetworkView;
 use crate::pages::services::ServicesView;
 use crate::pages::settings::SettingsView;
 
-use super::data::FileTab;
 use super::icons::{self, Icon};
 use super::layout;
 use super::nav::SecmPage;
 use super::panel::{GrowDirection, PanelWidth};
 use super::theme::{Appearance, Palette};
+
+use secm_core::logger::{LogBuffer, LogEntry};
 
 pub struct PiShell {
     pub appearance: Appearance,
@@ -44,9 +44,13 @@ pub struct PiShell {
     pub right_panel: PanelWidth,
     pub right_display_w: f32,
     pub current_page: SecmPage,
-    pub file_tabs: Vec<FileTab>,
-    pub active_file_tab_id: Option<String>,
     pub pages: PageEntities,
+    /// 右侧日志流面板：已渲染的行（新增拉取后追加，KEEP_LINES 内裁剪）
+    pub log_rows: Vec<LogEntry>,
+    /// 日志级别筛选（空 = 全部）
+    pub log_filter_level: String,
+    /// 日志流滚动句柄（新行到达自动滚到底）
+    pub log_scroll: Option<gpui::ScrollHandle>,
     /// 侧栏底部「本机 IP」卡数据（首个 Up 网卡 IPv4；None = 未取到/未连接）
     pub local_ip: Option<String>,
     /// IP 卡读取中（后台枚举未回）
@@ -57,11 +61,10 @@ pub struct PiShell {
     pub net_info_loading: bool,
 }
 
-/// 11 页实体 + 可见性标志（dashboard/logs 轮询门控）
+/// 10 页实体 + 可见性标志（dashboard 轮询门控；日志已迁右栏流面板，不再有页实体）
 pub struct PageEntities {
     pub flags: Vec<Arc<AtomicBool>>,
     pub dashboard: Option<Entity<DashboardView>>,
-    pub logs: Option<Entity<LogsView>>,
     pub settings: Option<Entity<SettingsView>>,
     pub services: Option<Entity<ServicesView>>,
     pub cleanup: Option<Entity<CleanupView>>,
@@ -82,7 +85,6 @@ impl PageEntities {
         Self {
             flags,
             dashboard: None,
-            logs: None,
             settings: None,
             services: None,
             cleanup: None,
@@ -113,18 +115,20 @@ impl PiShell {
                 "sidebar-width",
             ),
             sidebar_display_w: layout::SIDEBAR_DEFAULT_WIDTH,
-            right_open: false,
+            // 右栏 = 日志流面板，默认展开（日志常驻可见）
+            right_open: true,
             right_panel: PanelWidth::new(
                 layout::RIGHT_PANEL_MIN_WIDTH,
                 layout::RIGHT_PANEL_MAX_WIDTH,
                 layout::RIGHT_PANEL_FALLBACK_WIDTH,
                 "right-panel-width",
             ),
-            right_display_w: 0.0,
+            right_display_w: layout::RIGHT_PANEL_FALLBACK_WIDTH,
             current_page: SecmPage::Dashboard,
-            file_tabs: vec![],
-            active_file_tab_id: None,
             pages: PageEntities::new(),
+            log_rows: Vec::new(),
+            log_filter_level: String::new(),
+            log_scroll: None,
             local_ip: None,
             ip_loading: false,
             net_info: None,
@@ -132,10 +136,85 @@ impl PiShell {
 
         };
         this.ensure_page(SecmPage::Dashboard, cx);
+        log::info!("界面壳就绪：三栏布局 + 右侧日志流面板");
         this.refresh_local_ip(cx);
         this.refresh_net_info(cx);
         this.start_net_rate_poll(cx);
+        this.start_log_poll(cx);
         this
+    }
+
+    /// 启动右侧日志流面板轮询（500ms 拉 LogBuffer 增量追加）。
+    /// 面板折叠时暂停（展开后 pull_log_rows 全量对齐补上遗漏）。
+    fn start_log_poll(&self, cx: &mut Context<Self>) {
+        let weak = cx.entity().downgrade();
+        cx.spawn(async move |_this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+            loop {
+                gpui::Timer::after(std::time::Duration::from_millis(500)).await;
+                if let Some(shell) = weak.upgrade() {
+                    shell
+                        .update(cx, |t, cx| {
+                            if t.right_open {
+                                t.pull_log_rows(cx);
+                            }
+                        })
+                        .ok();
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// 从全局 LogBuffer 拉取增量行（追加到 log_rows 并裁剪；无新行不触发重绘）
+    pub fn pull_log_rows(&mut self, cx: &mut Context<Self>) {
+        let all = LogBuffer::global().get_all();
+        // LogBuffer 为环形 200 条；若本地行首与全局行首一致说明是连续前缀，
+        // 只追加新增；否则（清空/环形顶掉）直接全量对齐。
+        let prefix_match = self
+            .log_rows
+            .first()
+            .zip(all.first())
+            .map_or(false, |(a, b)| {
+                a.timestamp == b.timestamp && a.level == b.level && a.message == b.message
+            });
+        let changed;
+        let rows = if prefix_match {
+            // 前缀连续：仅追加全局多出的新行
+            let have = self.log_rows.len();
+            if all.len() > have {
+                changed = true;
+                let mut merged = self.log_rows.clone();
+                merged.extend(all[have..].iter().cloned());
+                merged
+            } else {
+                changed = false;
+                self.log_rows.clone()
+            }
+        } else {
+            // 不一致（首次拉取/清空/环形顶掉）→ 全量对齐
+            changed = self.log_rows.len() != all.len() || self.log_rows.is_empty() != all.is_empty();
+            all
+        };
+        if !changed && self.log_rows.len() == rows.len() {
+            return;
+        }
+        self.log_rows = rows;
+        if self.log_rows.len() > super::right_panel::KEEP_LINES {
+            let drop = self.log_rows.len() - super::right_panel::KEEP_LINES;
+            self.log_rows.drain(..drop);
+        }
+        // 新日志到达 → 流式跟随最新（滚到底）
+        if let Some(h) = self.log_scroll.as_ref() {
+            h.scroll_to_bottom();
+        }
+        cx.notify();
+    }
+
+    /// 清空日志流面板（仅清屏显示，不动全局缓冲与落盘）
+    pub fn clear_log_panel(&mut self, cx: &mut Context<Self>) {
+        self.log_rows.clear();
+        log::info!("日志流已清空显示（全局缓冲与落盘保留）");
+        cx.notify();
     }
 
     /// 启动侧栏网络速率周期刷新（1s；PDH 需要 ≥1s 间隔累积样本）。
@@ -170,11 +249,13 @@ impl PiShell {
             Appearance::Light => Appearance::Dark,
             Appearance::Dark => Appearance::Light,
         };
+        log::info!("切换主题 → {}", if self.appearance == Appearance::Dark { "深色" } else { "浅色" });
         cx.notify();
     }
 
     pub fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_open = !self.sidebar_open;
+        log::info!("侧栏 {}", if self.sidebar_open { "展开" } else { "折叠" });
         cx.notify();
     }
 
@@ -183,6 +264,7 @@ impl PiShell {
         if self.right_open && self.right_display_w <= 0.0 {
             self.right_display_w = self.right_panel.width;
         }
+        log::info!("日志面板 {}", if self.right_open { "展开" } else { "折叠" });
         cx.notify();
     }
 
@@ -292,6 +374,7 @@ impl PiShell {
             .store(false, Ordering::Relaxed);
         self.pages.flag_for(page).store(true, Ordering::Relaxed);
         self.current_page = page;
+        log::info!("切换页面 → {}", page.label());
         self.ensure_page(page, cx);
         cx.notify();
     }
@@ -302,12 +385,6 @@ impl PiShell {
                 if self.pages.dashboard.is_none() {
                     let flag = self.pages.flag_for(page);
                     self.pages.dashboard = Some(cx.new(|cx| DashboardView::new(flag, cx)));
-                }
-            }
-            SecmPage::Logs => {
-                if self.pages.logs.is_none() {
-                    let flag = self.pages.flag_for(page);
-                    self.pages.logs = Some(cx.new(|cx| LogsView::new(flag, cx)));
                 }
             }
             SecmPage::Settings => {
@@ -363,11 +440,6 @@ impl PiShell {
             SecmPage::Dashboard => self
                 .pages
                 .dashboard
-                .as_ref()
-                .map(|e| e.clone().into_any_element()),
-            SecmPage::Logs => self
-                .pages
-                .logs
                 .as_ref()
                 .map(|e| e.clone().into_any_element()),
             SecmPage::Settings => self

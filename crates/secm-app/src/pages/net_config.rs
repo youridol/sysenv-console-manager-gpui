@@ -76,6 +76,7 @@ impl NetConfigView {
             ipv6_input,
             ipv6_gw_input,
         };
+        log::info!("网络配置 · 页面已打开（管理员: {}）", v.admin);
         // 后台枚举适配器并自动选中首个 Up 接口
         v.refresh(cx);
         v
@@ -132,6 +133,8 @@ impl NetConfigView {
         self.selected = Some(name.to_string());
         self.steps.clear();
         self.status.clear();
+        // UI 侧日志：用户选中适配器
+        log::info!("网络配置 · 选中适配器 {}", name);
         // 预填 MAC 输入框为当前地址（便于直接修改）
         if let Some(a) = self.adapters.iter().find(|a| a.name == name) {
             if let Some(mac) = &a.mac {
@@ -170,6 +173,22 @@ impl NetConfigView {
             let result = exec
                 .spawn(async move { net_config::apply_network_config(&req) })
                 .await;
+            // UI 侧日志：网络配置应用结果（部分失败用 warn）
+            if result.all_ok {
+                log::info!("网络配置 · 配置应用成功（{} 项）", result.steps.len());
+            } else {
+                let failed: Vec<&str> = result
+                    .steps
+                    .iter()
+                    .filter(|s| !s.ok)
+                    .map(|s| s.name.as_str())
+                    .collect();
+                log::warn!(
+                    "网络配置 · 配置应用失败步骤（{}）: {}",
+                    failed.len(),
+                    failed.join("，")
+                );
+            }
             if let Some(view) = weak.upgrade() {
                 view.update(cx, |this, cx| {
                     this.applying = false;
@@ -190,14 +209,17 @@ impl NetConfigView {
     fn set_dhcp(&mut self, cx: &mut Context<Self>) {
         let Some(name) = self.selected.clone() else {
             self.status = "请先选择一个网络适配器".to_string();
+            log::warn!("网络配置 · 切换 DHCP 失败：未选择适配器");
             cx.notify();
             return;
         };
         if !self.admin {
             self.status = "需要管理员权限执行网络配置修改".to_string();
+            log::warn!("网络配置 · 切换 DHCP 失败：需要管理员权限");
             cx.notify();
             return;
         }
+        log::info!("网络配置 · 切换适配器 {} 为 DHCP", name);
         let req = net_config::NetworkConfigRequest {
             ifname: name,
             mode_v4: "dhcp".into(),
@@ -217,11 +239,13 @@ impl NetConfigView {
     fn apply_static_v4(&mut self, cx: &mut Context<Self>) {
         let Some(name) = self.selected.clone() else {
             self.status = "请先选择一个网络适配器".to_string();
+            log::warn!("网络配置 · 应用静态 IPv4 失败：未选择适配器");
             cx.notify();
             return;
         };
         if !self.admin {
             self.status = "需要管理员权限执行网络配置修改".to_string();
+            log::warn!("网络配置 · 应用静态 IPv4 失败：需要管理员权限");
             cx.notify();
             return;
         }
@@ -232,9 +256,11 @@ impl NetConfigView {
 
         if ip.trim().is_empty() || mask.trim().is_empty() {
             self.status = "请填写 IPv4 地址与子网掩码".to_string();
+            log::warn!("网络配置 · 应用静态 IPv4 失败：未填写地址与掩码");
             cx.notify();
             return;
         }
+        log::info!("网络配置 · 应用静态 IPv4 {} / {} 到适配器 {}", ip.trim(), mask.trim(), name);
         // DNS 解析逗号/空格分隔列表
         let dns_list: Vec<String> = dns_text
             .split([',', '，', ' '])
@@ -269,17 +295,20 @@ impl NetConfigView {
     fn apply_static_v6(&mut self, cx: &mut Context<Self>) {
         let Some(name) = self.selected.clone() else {
             self.status = "请先选择一个网络适配器".to_string();
+            log::warn!("网络配置 · 应用静态 IPv6 失败：未选择适配器");
             cx.notify();
             return;
         };
         if !self.admin {
             self.status = "需要管理员权限执行网络配置修改".to_string();
+            log::warn!("网络配置 · 应用静态 IPv6 失败：需要管理员权限");
             cx.notify();
             return;
         }
         let ipv6 = self.ipv6_input.read(cx).value().to_string();
         let gw6 = self.ipv6_gw_input.read(cx).value().to_string();
 
+        log::info!("网络配置 · 应用静态 IPv6 {} 到适配器 {}", ipv6.trim(), name);
         let req = net_config::NetworkConfigRequest {
             ifname: name.clone(),
             mode_v4: "dhcp".into(),
@@ -299,20 +328,24 @@ impl NetConfigView {
     fn apply_mac(&mut self, cx: &mut Context<Self>) {
         let Some(adapter) = self.selected_adapter().cloned() else {
             self.status = "请先选择一个网络适配器".to_string();
+            log::warn!("网络配置 · 修改 MAC 失败：未选择适配器");
             cx.notify();
             return;
         };
         if !self.admin {
             self.status = "需要管理员权限执行 MAC 修改".to_string();
+            log::warn!("网络配置 · 修改 MAC 失败：需要管理员权限");
             cx.notify();
             return;
         }
         let mac = self.mac_input.read(cx).value().to_string();
         if mac.trim().is_empty() {
             self.status = "请填写新的 MAC 地址".to_string();
+            log::warn!("网络配置 · 修改 MAC 失败：未填写新 MAC");
             cx.notify();
             return;
         }
+        log::info!("网络配置 · 修改适配器 {} MAC 为 {}", adapter.name, mac.trim());
         // 后台执行（netsh 禁启用网卡可能阻塞数百 ms）
         let weak = cx.entity().downgrade();
         let mac_v = mac.trim().to_string();
@@ -328,6 +361,11 @@ impl NetConfigView {
                     net_config::set_network_mac(&name2, &mac2, guid2.as_deref())
                 })
                 .await;
+            // UI 侧日志：MAC 修改结果
+            match &result {
+                Ok(msg) => log::info!("网络配置 · 适配器 {} MAC 修改成功：{}", name_v, msg),
+                Err(e) => log::warn!("网络配置 · 适配器 {} MAC 修改失败: {}", name_v, e),
+            }
             if let Some(view) = weak.upgrade() {
                 view.update(cx, |this, cx| {
                     match result {

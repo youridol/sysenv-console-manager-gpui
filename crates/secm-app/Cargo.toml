@@ -12,6 +12,7 @@ anyhow = "1"
 serde_json = "1"
 tray-icon = "0.24"
 unicode-segmentation = "1"
+log.workspace = true
 # 托盘图标解码（与 gpui 内部同版本；仅启用 png 解码面）
 image = { version = "0.25", default-features = false, features = ["png"] }
 # gpui Window → 原生 HWND 桥接（窗口图标挂接）

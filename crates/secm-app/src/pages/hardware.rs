@@ -22,6 +22,7 @@ pub struct HardwareView {
 
 impl HardwareView {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        log::info!("硬件检测 · 页面已打开");
         let mut v = Self {
             disks: Vec::new(),
             loading_disks: false,
@@ -59,6 +60,8 @@ impl HardwareView {
 
     /// 后台刷新磁盘清单并清除已展开 SMART/错误
     fn refresh(&mut self, cx: &mut Context<Self>) {
+        // UI 侧日志：用户点击刷新磁盘列表
+        log::info!("硬件检测 · 触发磁盘列表刷新");
         self.smart.clear();
         self.error.clear();
         self.refresh_disks(cx);
@@ -70,6 +73,8 @@ impl HardwareView {
         if self.loading_smart.is_some() {
             return;
         }
+        // UI 侧日志：用户展开磁盘详情（触发读取）
+        log::info!("硬件检测 · 读取磁盘 {} S.M.A.R.T 详情", disk_id);
         let id = disk_id.to_string();
         self.loading_smart = Some(id.clone());
         self.error.clear();
@@ -81,6 +86,16 @@ impl HardwareView {
             let exec = cx.background_executor().clone();
             let id2 = id.clone();
             let result = exec.spawn(async move { hardware::read_smart(&id2) }).await;
+
+            // UI 侧日志：SMART 读取结果（磁盘健康摘要）
+            match &result {
+                Ok(sv) => log::info!(
+                    "硬件检测 · 磁盘 {} S.M.A.R.T 读取成功：{}",
+                    id,
+                    sv.summary.title
+                ),
+                Err(e) => log::warn!("硬件检测 · 磁盘 {} S.M.A.R.T 读取失败: {}", id, e),
+            }
 
             if let Some(view) = weak.upgrade() {
                 view.update(cx, |this, cx| {

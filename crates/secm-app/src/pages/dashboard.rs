@@ -22,6 +22,7 @@ pub struct DashboardView {
 
 impl DashboardView {
     pub fn new(active: Arc<AtomicBool>, cx: &mut Context<Self>) -> Self {
+        log::info!("硬件信息 · 页面已打开（传感器 1s 轮询启动）");
         SensorService::start_once();
         let mut view = Self {
             snap: SensorService::snapshot(),

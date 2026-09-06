@@ -89,6 +89,7 @@ impl CleanupView {
             keyword: SharedString::from(""),
             search_input,
         };
+        log::info!("清理优化 · 页面已打开");
         v.refresh_procs(cx);
         v
     }
@@ -128,10 +129,17 @@ impl CleanupView {
 
     /// DNS 刷新（系统 API，后台执行）
     fn flush_dns(&mut self, cx: &mut Context<Self>) {
+        log::info!("清理优化 · 触发 DNS 刷新");
         let weak: WeakEntity<Self> = cx.entity().downgrade();
         cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
             let exec = cx.background_executor().clone();
             let r = exec.spawn(async move { cleanup::flush_dns() }).await;
+            // UI 侧日志：DNS 刷新完成/失败（CleanupResult 无 Err，按 success 判）
+            if r.success {
+                log::info!("清理优化 · DNS 刷新完成");
+            } else {
+                log::warn!("清理优化 · DNS 刷新失败: {}", r.message);
+            }
             if let Some(view) = weak.upgrade() {
                 view.update(cx, |this, cx| {
                     this.status = SharedString::from(r.message.clone());
@@ -150,12 +158,20 @@ impl CleanupView {
         }
         self.cleaning = true;
         self.status = SharedString::from(format!("{}执行中…", op.label()));
+        // UI 侧日志：用户触发清理动作（触发点）
+        log::info!("清理优化 · 触发{}", op.label());
         cx.notify();
 
         let weak: WeakEntity<Self> = cx.entity().downgrade();
         cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
             let exec = cx.background_executor().clone();
             let result = exec.spawn(async move { op.run() }).await;
+            // UI 侧日志：清理结果（CleanupResult 非 Result，按 success/bytes 判）
+            if result.success {
+                log::info!("清理优化 · {}完成，释放 {} 字节", op.label(), result.bytes_freed);
+            } else {
+                log::warn!("清理优化 · {}未完全成功: {}", op.label(), result.message);
+            }
             if let Some(view) = weak.upgrade() {
                 view.update(cx, |this, cx| {
                     this.cleaning = false;
@@ -171,13 +187,21 @@ impl CleanupView {
 
     /// 设置进程优先级（系统 API，后台执行）
     fn set_prio(&mut self, pid: u32, prio: &str, cx: &mut Context<Self>) {
+        log::info!("清理优化 · 设置进程优先级 {} → {}", pid, prio);
         let weak: WeakEntity<Self> = cx.entity().downgrade();
         let prio_c = prio.to_string();
+        let prio_log = prio_c.clone();
         cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
             let exec = cx.background_executor().clone();
             let r = exec
                 .spawn(async move { cleanup::set_process_priority(pid, &prio_c) })
                 .await;
+            // UI 侧日志：优先级设置结果
+            if r.success {
+                log::info!("清理优化 · 设置进程 {} 优先级为 {} 成功", pid, prio_log);
+            } else {
+                log::warn!("清理优化 · 设置进程 {} 优先级失败: {}", pid, r.message);
+            }
             if let Some(view) = weak.upgrade() {
                 view.update(cx, |this, cx| {
                     this.status = SharedString::from(r.message.clone());

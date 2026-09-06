@@ -25,6 +25,7 @@ pub struct NetworkView {
 
 impl NetworkView {
     pub fn new(_cx: &mut Context<Self>) -> Self {
+        log::info!("网络诊断 · 页面已打开");
         Self {
             running: false,
             status: String::from("就绪 — 点击「运行诊断」开始检测"),
@@ -44,6 +45,8 @@ impl NetworkView {
         self.site_rows.clear();
         self.port_rows.clear();
         self.dns_rows.clear();
+        // UI 侧日志：用户点击运行诊断（触发点）
+        log::info!("网络诊断 · 开始运行网络诊断");
         cx.notify();
 
         let weak = cx.entity().downgrade();
@@ -144,6 +147,14 @@ impl NetworkView {
                 })
                 .await;
 
+            // UI 侧日志：诊断完成，记录通过行数
+            {
+                let ok_total = site_rows.iter().filter(|r| r.ok).count()
+                    + port_rows.iter().filter(|r| r.ok).count()
+                    + dns_rows.iter().filter(|r| r.ok).count();
+                let all = site_rows.len() + port_rows.len() + dns_rows.len();
+                log::info!("网络诊断 · 检测完成：{} / {} 行通过", ok_total, all);
+            }
             // 回到 UI 线程，把结果写回视图
             if let Some(view) = weak.upgrade() {
                 view.update(cx, |this, cx| {

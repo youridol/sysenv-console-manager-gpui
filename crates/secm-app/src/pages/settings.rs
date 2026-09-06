@@ -90,6 +90,7 @@ pub struct SettingsView {
 
 impl SettingsView {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        log::info!("系统设置 · 页面已打开");
         let mut v = Self {
             toggles: Vec::new(),
             plans: Vec::new(),
@@ -170,6 +171,11 @@ impl SettingsView {
                     kind_c.set(!cur.enabled)
                 })
                 .await;
+            // UI 侧日志：记录用户触发的开关切换（成功用 info，失败用 warn）
+            match &result {
+                Ok(s) => log::info!("系统设置 · 已切换「{}」→ {}", kind_c.label(), s.message),
+                Err(e) => log::warn!("系统设置 · 切换「{}」失败: {}", kind_c.label(), e),
+            }
             if let Some(view) = weak.upgrade() {
                 view.update(cx, |this, cx| {
                     this.op_busy = false;
@@ -209,11 +215,22 @@ impl SettingsView {
 
         let weak: WeakEntity<Self> = cx.entity().downgrade();
         let guid_c = guid.to_string();
+        let name_c = self
+            .plans
+            .iter()
+            .find(|p| p.guid == guid)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| format!("计划 {}", &guid[..8.min(guid.len())]));
         cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
             let exec = cx.background_executor().clone();
             let result = exec
                 .spawn(async move { settings::set_power_plan(&guid_c) })
                 .await;
+            // UI 侧日志：电源计划激活结果
+            match &result {
+                Ok(()) => log::info!("系统设置 · 已激活电源计划 {}", name_c),
+                Err(e) => log::warn!("系统设置 · 激活电源计划 {} 失败: {}", name_c, e),
+            }
             if let Some(view) = weak.upgrade() {
                 view.update(cx, |this, cx| {
                     this.op_busy = false;
@@ -276,6 +293,16 @@ impl SettingsView {
             let result = exec
                 .spawn(async move { settings::set_hetero_policy(&kind_c, value_c) })
                 .await;
+            // UI 侧日志：异类调度策略设置结果
+            let value_label = Self::hetero_label(value_c);
+            match &result {
+                Ok(()) => log::info!(
+                    "系统设置 · {}已设为「{}」",
+                    kind_label_c,
+                    value_label
+                ),
+                Err(e) => log::warn!("系统设置 · 设置{}失败: {}", kind_label_c, e),
+            }
             if let Some(view) = weak.upgrade() {
                 view.update(cx, |this, cx| {
                     this.op_busy = false;
@@ -314,6 +341,11 @@ impl SettingsView {
             let result = exec
                 .spawn(async move { settings::enable_ultimate_performance() })
                 .await;
+            // UI 侧日志：导入卓越性能计划结果
+            match &result {
+                Ok(msg) => log::info!("系统设置 · 导入卓越性能计划成功: {}", msg),
+                Err(e) => log::warn!("系统设置 · 导入卓越性能计划失败: {}", e),
+            }
             if let Some(view) = weak.upgrade() {
                 view.update(cx, |this, cx| {
                     this.op_busy = false;
