@@ -203,9 +203,9 @@ impl PiShell {
             let drop = self.log_rows.len() - super::right_panel::KEEP_LINES;
             self.log_rows.drain(..drop);
         }
-        // 新日志到达 → 流式跟随最新（滚到底）
+        // 新日志到达 → 流式跟随最新（最新在顶部第一条，滚动置顶）
         if let Some(h) = self.log_scroll.as_ref() {
-            h.scroll_to_bottom();
+            h.scroll_to_top_of_item(0);
         }
         cx.notify();
     }

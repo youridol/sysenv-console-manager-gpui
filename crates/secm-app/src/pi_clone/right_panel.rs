@@ -180,12 +180,14 @@ impl PiShell {
             .child(SharedString::from(owned_label))
     }
 
-    /// 日志流主体（滚动行列表；自动跟随最新；点击行复制该条日志）
+    /// 日志流主体（滚动行列表；**最新日志在第一条**（倒序渲染）；点击行复制该条日志）
     fn log_stream(&mut self, pal: &Palette, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let level = self.log_filter_level.clone();
+        // 倒序：日志行按新→旧排列，最新条目显示在顶部第一条
         let rows: Vec<gpui::AnyElement> = self
             .log_rows
             .iter()
+            .rev()
             .filter(|e| level.is_empty() || e.level == level)
             .enumerate()
             .map(|(ix, e)| {
@@ -262,6 +264,7 @@ impl PiShell {
             .flex_1()
             .min_h(px(0.0))
             .overflow_y_scroll()
+            .scrollbar_width(px(8.0))
             .track_scroll(&scroll)
             .bg(pal.bg)
             .when(rows.is_empty(), |s| {

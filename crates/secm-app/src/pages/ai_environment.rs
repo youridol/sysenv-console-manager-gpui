@@ -166,6 +166,8 @@ impl AiEnvironmentView {
         if self.action_busy {
             return;
         }
+        // 全链路行为日志：用户触发 AI 工具安装/升级/卸载
+        log::info!("AI 环境 · 触发{} {}", action.label(), action.package());
         self.action_busy = true;
         self.status = action.status_text();
         cx.notify();
@@ -184,6 +186,12 @@ impl AiEnvironmentView {
                     }
                 })
                 .await;
+
+            // 全链路行为日志：AI 工具操作返回信息
+            match &result {
+                Ok(msg) => log::info!("AI 环境 · {} {} 成功: {}", action.label(), action.package(), msg),
+                Err(e) => log::warn!("AI 环境 · {} {} 失败: {}", action.label(), action.package(), e),
+            }
 
             if let Some(view) = weak.upgrade() {
                 view.update(cx, |this, cx| {
@@ -210,6 +218,8 @@ impl AiEnvironmentView {
         if self.action_busy {
             return;
         }
+        // 全链路行为日志：用户触发 MCP 安装/卸载
+        log::info!("AI 环境 · 触发{} {}", action.label(), action.package());
         self.action_busy = true;
         self.status = action.status_text();
         cx.notify();
@@ -226,6 +236,12 @@ impl AiEnvironmentView {
                     }
                 })
                 .await;
+
+            // 全链路行为日志：MCP 操作返回信息
+            match &result {
+                Ok(msg) => log::info!("AI 环境 · {} {} 成功: {}", action.label(), action.package(), msg),
+                Err(e) => log::warn!("AI 环境 · {} {} 失败: {}", action.label(), action.package(), e),
+            }
 
             if let Some(view) = weak.upgrade() {
                 view.update(cx, |this, cx| {
@@ -263,6 +279,11 @@ impl ToolAction {
             Self::Uninstall(_) => "卸载",
         }
     }
+    fn package(&self) -> &str {
+        match self {
+            Self::Install(p) | Self::Upgrade(p) | Self::Uninstall(p) => p,
+        }
+    }
     fn status_text(&self) -> String {
         match self {
             Self::Install(p) | Self::Upgrade(p) | Self::Uninstall(p) => {
@@ -277,6 +298,11 @@ impl McpAction {
         match self {
             Self::Install(_) => "安装 MCP",
             Self::Uninstall(_) => "卸载 MCP",
+        }
+    }
+    fn package(&self) -> &str {
+        match self {
+            Self::Install(p) | Self::Uninstall(p) => p,
         }
     }
     fn status_text(&self) -> String {

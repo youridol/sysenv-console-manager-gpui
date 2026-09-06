@@ -46,6 +46,8 @@ impl HardwareView {
         cx.spawn(async move |_this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
             let exec = cx.background_executor().clone();
             let disks = exec.spawn(async move { hardware::list_disks() }).await;
+            // 全链路行为日志：磁盘枚举返回信息
+            log::info!("硬件检测 · 磁盘枚举完成，共 {} 块物理盘", disks.len());
             if let Some(view) = weak.upgrade() {
                 view.update(cx, |this, cx| {
                     this.loading_disks = false;
