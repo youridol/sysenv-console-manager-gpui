@@ -32,5 +32,5 @@ pub fn link_speeds() -> HashMap<String, String> {
 
 /// 当前活跃（ESTABLISHED）TCP 连接数（IPv4 全表统计；失败 0）
 pub fn tcp_connection_count() -> u32 {
-    secm_datasource::net_io::tcp_connection_count()
+    netif::tcp_connection_count()
 }
