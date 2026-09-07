@@ -357,9 +357,9 @@ pub fn enum_services() -> Result<Vec<ServiceInfo>, CollectError> {
         // ENUM_SERVICE_STATUS_PROCESSW，每元素大小固定（含尾随宽字符串）
         let elem_size = std::mem::size_of::<ENUM_SERVICE_STATUS_PROCESSW>();
         for i in 0..services_returned_cur as usize {
-            let offset = i.checked_mul(elem_size).ok_or_else(|| {
-                CollectError::parse("服务枚举数组", "索引溢出")
-            })?;
+            let offset = i
+                .checked_mul(elem_size)
+                .ok_or_else(|| CollectError::parse("服务枚举数组", "索引溢出"))?;
             let ptr = buf.as_ptr().wrapping_add(offset) as *const ENUM_SERVICE_STATUS_PROCESSW;
             // SAFETY: 指针位于 buf 有效范围内，由 API 填充，读取 POD 字段安全
             let entry = unsafe { &*ptr };

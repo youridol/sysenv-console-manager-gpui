@@ -23,24 +23,25 @@ use windows_sys::Win32::{
     Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE},
     Storage::{
         FileSystem::{
-            FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, BusTypeAta,
-            BusTypeNvme, BusTypeSata, BusTypeScsi, BusTypeUsb,
+            BusTypeAta, BusTypeNvme, BusTypeSata, BusTypeScsi, BusTypeUsb, FILE_ATTRIBUTE_NORMAL,
+            FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
         },
         IscsiDisc::{
-            ATA_PASS_THROUGH_EX, ATA_FLAGS_DATA_IN, ATA_FLAGS_DRDY_REQUIRED, IOCTL_ATA_PASS_THROUGH,
+            ATA_FLAGS_DATA_IN, ATA_FLAGS_DRDY_REQUIRED, ATA_PASS_THROUGH_EX, IOCTL_ATA_PASS_THROUGH,
         },
         Nvme::{NVME_HEALTH_INFO_LOG, NVME_LOG_PAGE_HEALTH_INFO},
     },
     System::{
-        IO::DeviceIoControl,
         Ioctl::{
-            DEVICE_SEEK_PENALTY_DESCRIPTOR, GET_LENGTH_INFORMATION, IOCTL_DISK_GET_LENGTH_INFO,
-            IOCTL_STORAGE_QUERY_PROPERTY, NVMeDataTypeLogPage, ProtocolTypeNvme,
-            STORAGE_DEVICE_DESCRIPTOR, STORAGE_PROPERTY_QUERY, STORAGE_PROTOCOL_DATA_DESCRIPTOR_EXT,
-            STORAGE_PROTOCOL_SPECIFIC_DATA_EXT, StorageAdapterProtocolSpecificProperty,
-            StorageDeviceProperty, StorageDeviceSeekPenaltyProperty, PropertyStandardQuery,
-            STORAGE_QUERY_TYPE, STORAGE_PROPERTY_ID,
+            NVMeDataTypeLogPage, PropertyStandardQuery, ProtocolTypeNvme,
+            StorageAdapterProtocolSpecificProperty, StorageDeviceProperty,
+            StorageDeviceSeekPenaltyProperty, DEVICE_SEEK_PENALTY_DESCRIPTOR,
+            GET_LENGTH_INFORMATION, IOCTL_DISK_GET_LENGTH_INFO, IOCTL_STORAGE_QUERY_PROPERTY,
+            STORAGE_DEVICE_DESCRIPTOR, STORAGE_PROPERTY_ID, STORAGE_PROPERTY_QUERY,
+            STORAGE_PROTOCOL_DATA_DESCRIPTOR_EXT, STORAGE_PROTOCOL_SPECIFIC_DATA_EXT,
+            STORAGE_QUERY_TYPE,
         },
+        IO::DeviceIoControl,
     },
 };
 
@@ -263,11 +264,7 @@ pub fn enumerate_disks() -> Vec<DiskInfo> {
         match PhysicalDrive::open(index) {
             Ok(handle) => match read_disk_info(&handle) {
                 Ok(info) => disks.push(info),
-                Err(e) => log::warn!(
-                    "disk.enumerate: 磁盘 {} 信息读取失败: {}",
-                    index,
-                    e
-                ),
+                Err(e) => log::warn!("disk.enumerate: 磁盘 {} 信息读取失败: {}", index, e),
             },
             Err(CollectError::NotFound { .. }) => break,
             Err(e) => {
@@ -282,13 +279,15 @@ pub fn enumerate_disks() -> Vec<DiskInfo> {
     if disks.is_empty() {
         let wmi_disks = wmi_enumerate_disks();
         if !wmi_disks.is_empty() {
-            log::warn!("disk.enumerate: IOCTL 枚举为空（权限不足？），使用 WMI 兜底枚举 {} 块磁盘", wmi_disks.len());
+            log::warn!(
+                "disk.enumerate: IOCTL 枚举为空（权限不足？），使用 WMI 兜底枚举 {} 块磁盘",
+                wmi_disks.len()
+            );
             return wmi_disks;
         }
     }
     disks
 }
-
 
 /// WMI 兜底枚举磁盘（IOCTL 权限不足/不可用时）：
 /// 1. Storage 命名空间 MSFT_PhysicalDisk（含 BusType/MediaType）
@@ -297,7 +296,8 @@ fn wmi_enumerate_disks() -> Vec<DiskInfo> {
     let mut out: Vec<DiskInfo> = Vec::new();
     // 1) MSFT_PhysicalDisk
     if let Ok(conn) = wmi::WMIConnection::with_namespace_path("root\\Microsoft\\Windows\\Storage") {
-        let wql = "SELECT DeviceId,HealthStatus,FriendlyName,MediaType,BusType FROM MSFT_PhysicalDisk";
+        let wql =
+            "SELECT DeviceId,HealthStatus,FriendlyName,MediaType,BusType FROM MSFT_PhysicalDisk";
         if let Ok(disks) = conn.raw_query::<WmiPhysicalDisk>(wql) {
             for d in disks {
                 if let Some(id) = d.DeviceId {
@@ -328,7 +328,11 @@ fn wmi_enumerate_disks() -> Vec<DiskInfo> {
                         model: d.Model.clone().unwrap_or_default(),
                         serial: d.SerialNumber.clone().unwrap_or_default(),
                         interface_type: win32_interface_label(d.InterfaceType.as_deref()),
-                        media_type: if is_fixed { "HDD".to_string() } else { "SSD".to_string() },
+                        media_type: if is_fixed {
+                            "HDD".to_string()
+                        } else {
+                            "SSD".to_string()
+                        },
                         size_bytes: d.Size.unwrap_or(0),
                     });
                 }
@@ -448,7 +452,8 @@ fn read_disk_info(drive: &PhysicalDrive) -> Result<DiskInfo, CollectError> {
     // 头部为合法描述符结构
     let desc = unsafe { &*(raw.as_ptr() as *const STORAGE_DEVICE_DESCRIPTOR) };
     let model = parse_descriptor_string(&raw, desc.SerialNumberOffset != 0, desc.ProductIdOffset);
-    let serial = parse_descriptor_string(&raw, desc.SerialNumberOffset != 0, desc.SerialNumberOffset);
+    let serial =
+        parse_descriptor_string(&raw, desc.SerialNumberOffset != 0, desc.SerialNumberOffset);
 
     // 接口类型映射（STORAGE_BUS_TYPE 为 i32 别名，常量直接比较）
     let interface_type = if desc.BusType == BusTypeNvme {
@@ -469,7 +474,8 @@ fn read_disk_info(drive: &PhysicalDrive) -> Result<DiskInfo, CollectError> {
     let media_type = if interface_type == "NVMe" {
         "SSD".to_string()
     } else {
-        match drive.query_property::<DEVICE_SEEK_PENALTY_DESCRIPTOR>(StorageDeviceSeekPenaltyProperty)
+        match drive
+            .query_property::<DEVICE_SEEK_PENALTY_DESCRIPTOR>(StorageDeviceSeekPenaltyProperty)
         {
             Ok(d) => {
                 // windows-sys 0.61 起 IncursSeekPenalty 为 bool
@@ -673,7 +679,11 @@ fn read_nvme_health(drive: &PhysicalDrive) -> Result<NvmeHealthLog, CollectError
     if data_offset + size_of::<NVME_HEALTH_INFO_LOG>() > out.len() {
         return Err(CollectError::parse(
             "NVMe 健康日志",
-            format!("返回数据偏移越界（offset={}, buf={}）", data_offset, out.len()),
+            format!(
+                "返回数据偏移越界（offset={}, buf={}）",
+                data_offset,
+                out.len()
+            ),
         ));
     }
 
@@ -806,7 +816,11 @@ fn read_ata_attributes(drive: &PhysicalDrive) -> Result<Vec<SmartAttribute>, Col
     let thresholds = match ata_smart_read(drive, 0xD1) {
         Ok(t) => Some(t),
         Err(e) => {
-            log::debug!("disk.smart: 磁盘 {} 读取 SMART 阈值表失败（状态将置 UNKNOWN）: {}", drive.index, e);
+            log::debug!(
+                "disk.smart: 磁盘 {} 读取 SMART 阈值表失败（状态将置 UNKNOWN）: {}",
+                drive.index,
+                e
+            );
             None
         }
     };
@@ -1017,10 +1031,10 @@ struct WmiWin32DiskDrive {
 /// Win32_DiskDrive.Status → WmiHealthInfo.health_status 映射
 fn win32_status_to_health(status: Option<&str>) -> u8 {
     match status.unwrap_or("").to_ascii_lowercase().as_str() {
-        "ok" => 0,          // Healthy
-        "degraded" => 1,    // Warning
+        "ok" => 0,                             // Healthy
+        "degraded" => 1,                       // Warning
         "pred fail" | "error" | "failed" => 2, // Unhealthy
-        _ => 5,             // Unknown
+        _ => 5,                                // Unknown
     }
 }
 
@@ -1035,7 +1049,6 @@ fn win32_interface_label(t: Option<&str>) -> String {
         other => format!("其他({})", other),
     }
 }
-
 
 /// 查询单块盘的 WMI 健康信息（IOCTL 不可用时的兜底）
 ///
@@ -1072,7 +1085,11 @@ fn wmi_health_info(disk_id: &str) -> Result<Option<WmiFallbackData>, CollectErro
         match conn.raw_query::<WmiWin32DiskDrive>(&wql) {
             Ok(disks) => {
                 if let Some(d) = disks.first() {
-                    log::warn!("disk.wmi: 磁盘 {} 使用 Win32_DiskDrive 兜底（Status={:?}）", disk_id, d.Status);
+                    log::warn!(
+                        "disk.wmi: 磁盘 {} 使用 Win32_DiskDrive 兜底（Status={:?}）",
+                        disk_id,
+                        d.Status
+                    );
                     return Ok(Some(WmiFallbackData {
                         health: WmiHealthInfo {
                             health_status: win32_status_to_health(d.Status.as_deref()),

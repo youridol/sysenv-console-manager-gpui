@@ -5,11 +5,11 @@
 use std::ops::Range;
 
 use gpui::{
-    div, px, rgb, App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId,
-    ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable, GlobalElementId,
-    KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
-    Pixels, Point, ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle,
-    Window, actions, fill, point, prelude::*, relative, size,
+    actions, div, fill, point, prelude::*, px, relative, rgb, size, App, Bounds, ClipboardItem,
+    Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
+    FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString, Style,
+    TextRun, UTF16Selection, UnderlineStyle, Window,
 };
 use unicode_segmentation::*;
 
@@ -588,7 +588,10 @@ impl Element for TextFieldElement {
         let Some(line) = prepaint.line.take() else {
             return;
         };
-        if line.paint(bounds.origin, window.line_height(), window, cx).is_err() {
+        if line
+            .paint(bounds.origin, window.line_height(), window, cx)
+            .is_err()
+        {
             return;
         }
 

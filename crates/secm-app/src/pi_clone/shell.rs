@@ -10,11 +10,11 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use gpui::prelude::*;
+use gpui::Context;
 use gpui::{
     div, px, Entity, InteractiveElement, ParentElement, Render, SharedString, Styled, Window,
 };
-use gpui::prelude::*;
-use gpui::Context;
 
 use crate::pages::about::AboutView;
 use crate::pages::ai_environment::AiEnvironmentView;
@@ -136,7 +136,6 @@ impl PiShell {
             ip_loading: false,
             net_info: None,
             net_info_loading: false,
-
         };
         this.ensure_page(SecmPage::Dashboard, cx);
         log::info!("界面壳就绪：三栏布局 + 右侧日志流面板");
@@ -151,8 +150,8 @@ impl PiShell {
     /// 面板折叠时暂停（展开后 pull_log_rows 全量对齐补上遗漏）。
     fn start_log_poll(&self, cx: &mut Context<Self>) {
         let weak = cx.entity().downgrade();
-        cx.spawn(async move |_this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-            loop {
+        cx.spawn(
+            async move |_this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| loop {
                 gpui::Timer::after(std::time::Duration::from_millis(500)).await;
                 if let Some(shell) = weak.upgrade() {
                     shell
@@ -163,8 +162,8 @@ impl PiShell {
                         })
                         .ok();
                 }
-            }
-        })
+            },
+        )
         .detach();
     }
 
@@ -195,7 +194,8 @@ impl PiShell {
             }
         } else {
             // 不一致（首次拉取/清空/环形顶掉）→ 全量对齐
-            changed = self.log_rows.len() != all.len() || self.log_rows.is_empty() != all.is_empty();
+            changed =
+                self.log_rows.len() != all.len() || self.log_rows.is_empty() != all.is_empty();
             all
         };
         if !changed && self.log_rows.len() == rows.len() {
@@ -234,18 +234,18 @@ impl PiShell {
     /// 仅刷新本地链路字段（无网络请求），驱动上下行速率滚动。
     fn start_net_rate_poll(&self, cx: &mut Context<Self>) {
         let weak = cx.entity().downgrade();
-        cx.spawn(async move |_this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-            let mut tick = gpui::Timer::after(std::time::Duration::from_secs(1));
-            loop {
-                tick.await;
-                if let Some(shell) = weak.upgrade() {
-                    shell
-                        .update(cx, |t, cx| t.refresh_net_rate(cx))
-                        .ok();
+        cx.spawn(
+            async move |_this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let mut tick = gpui::Timer::after(std::time::Duration::from_secs(1));
+                loop {
+                    tick.await;
+                    if let Some(shell) = weak.upgrade() {
+                        shell.update(cx, |t, cx| t.refresh_net_rate(cx)).ok();
+                    }
+                    tick = gpui::Timer::after(std::time::Duration::from_secs(1));
                 }
-                tick = gpui::Timer::after(std::time::Duration::from_secs(1));
-            }
-        })
+            },
+        )
         .detach();
     }
 
@@ -262,7 +262,14 @@ impl PiShell {
             Appearance::Light => Appearance::Dark,
             Appearance::Dark => Appearance::Light,
         };
-        log::info!("切换主题 → {}", if self.appearance == Appearance::Dark { "深色" } else { "浅色" });
+        log::info!(
+            "切换主题 → {}",
+            if self.appearance == Appearance::Dark {
+                "深色"
+            } else {
+                "浅色"
+            }
+        );
         // 主题联动：向全部已实例化页面实体同步外观（懒加载页由 ensure_page 取当前外观）
         let appearance = self.appearance;
         if let Some(e) = self.pages.dashboard.as_ref() {
@@ -300,7 +307,14 @@ impl PiShell {
 
     pub fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_open = !self.sidebar_open;
-        log::info!("侧栏 {}", if self.sidebar_open { "展开" } else { "折叠" });
+        log::info!(
+            "侧栏 {}",
+            if self.sidebar_open {
+                "展开"
+            } else {
+                "折叠"
+            }
+        );
         cx.notify();
     }
 
@@ -323,26 +337,29 @@ impl PiShell {
         cx.notify();
 
         let weak: gpui::WeakEntity<Self> = cx.entity().downgrade();
-        cx.spawn(async move |_this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-            let exec = cx.background_executor().clone();
-            let adapters = exec
-                .spawn(async move { secm_core::netif::list_adapters().unwrap_or_default() })
-                .await;
-            // 首个 Up 适配器的第一个 IPv4；无 Up 或空则显示「未连接」
-            let ip = adapters
-                .iter()
-                .find(|a| a.status == "Up")
-                .and_then(|a| a.ipv4.first())
-                .cloned();
-            if let Some(shell) = weak.upgrade() {
-                shell.update(cx, |this, cx| {
-                    this.ip_loading = false;
-                    this.local_ip = ip;
-                    cx.notify();
-                })
-                .ok();
-            }
-        })
+        cx.spawn(
+            async move |_this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let exec = cx.background_executor().clone();
+                let adapters = exec
+                    .spawn(async move { secm_core::netif::list_adapters().unwrap_or_default() })
+                    .await;
+                // 首个 Up 适配器的第一个 IPv4；无 Up 或空则显示「未连接」
+                let ip = adapters
+                    .iter()
+                    .find(|a| a.status == "Up")
+                    .and_then(|a| a.ipv4.first())
+                    .cloned();
+                if let Some(shell) = weak.upgrade() {
+                    shell
+                        .update(cx, |this, cx| {
+                            this.ip_loading = false;
+                            this.local_ip = ip;
+                            cx.notify();
+                        })
+                        .ok();
+                }
+            },
+        )
         .detach();
     }
 
@@ -356,20 +373,23 @@ impl PiShell {
         cx.notify();
 
         let weak: gpui::WeakEntity<Self> = cx.entity().downgrade();
-        cx.spawn(async move |_this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-            let exec = cx.background_executor().clone();
-            let info = exec
-                .spawn(async move { secm_core::net_info::collect_net_info() })
-                .await;
-            if let Some(shell) = weak.upgrade() {
-                shell.update(cx, |this, cx| {
-                    this.net_info_loading = false;
-                    this.net_info = Some(info);
-                    cx.notify();
-                })
-                .ok();
-            }
-        })
+        cx.spawn(
+            async move |_this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let exec = cx.background_executor().clone();
+                let info = exec
+                    .spawn(async move { secm_core::net_info::collect_net_info() })
+                    .await;
+                if let Some(shell) = weak.upgrade() {
+                    shell
+                        .update(cx, |this, cx| {
+                            this.net_info_loading = false;
+                            this.net_info = Some(info);
+                            cx.notify();
+                        })
+                        .ok();
+                }
+            },
+        )
         .detach();
     }
 
@@ -387,25 +407,28 @@ impl PiShell {
         cx.notify();
 
         let weak: gpui::WeakEntity<Self> = cx.entity().downgrade();
-        cx.spawn(async move |_this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-            let exec = cx.background_executor().clone();
-            // 后台克隆一份做本地刷新（不动主线程共享数据）
-            let mut next = current;
-            let updated = exec
-                .spawn(async move {
-                    secm_core::net_info::refresh_local_rate(&mut next);
-                    next
-                })
-                .await;
-            if let Some(shell) = weak.upgrade() {
-                shell.update(cx, |this, cx| {
-                    this.net_info_loading = false;
-                    this.net_info = Some(updated);
-                    cx.notify();
-                })
-                .ok();
-            }
-        })
+        cx.spawn(
+            async move |_this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let exec = cx.background_executor().clone();
+                // 后台克隆一份做本地刷新（不动主线程共享数据）
+                let mut next = current;
+                let updated = exec
+                    .spawn(async move {
+                        secm_core::net_info::refresh_local_rate(&mut next);
+                        next
+                    })
+                    .await;
+                if let Some(shell) = weak.upgrade() {
+                    shell
+                        .update(cx, |this, cx| {
+                            this.net_info_loading = false;
+                            this.net_info = Some(updated);
+                            cx.notify();
+                        })
+                        .ok();
+                }
+            },
+        )
         .detach();
     }
 
@@ -431,7 +454,8 @@ impl PiShell {
             SecmPage::Dashboard => {
                 if self.pages.dashboard.is_none() {
                     let flag = self.pages.flag_for(page);
-                    self.pages.dashboard = Some(cx.new(|cx| DashboardView::new(flag, appearance, cx)));
+                    self.pages.dashboard =
+                        Some(cx.new(|cx| DashboardView::new(flag, appearance, cx)));
                 }
             }
             SecmPage::Settings => {
@@ -466,12 +490,14 @@ impl PiShell {
             }
             SecmPage::Environment => {
                 if self.pages.environment.is_none() {
-                    self.pages.environment = Some(cx.new(|cx| EnvironmentView::new(appearance, cx)));
+                    self.pages.environment =
+                        Some(cx.new(|cx| EnvironmentView::new(appearance, cx)));
                 }
             }
             SecmPage::AiEnvironment => {
                 if self.pages.ai_environment.is_none() {
-                    self.pages.ai_environment = Some(cx.new(|cx| AiEnvironmentView::new(appearance, cx)));
+                    self.pages.ai_environment =
+                        Some(cx.new(|cx| AiEnvironmentView::new(appearance, cx)));
                 }
             }
             SecmPage::About => {
@@ -555,9 +581,7 @@ impl PiShell {
             } else {
                 self.sidebar_display_w = target;
             }
-        } else if !self.sidebar_open
-            && !self.sidebar_panel.resizing
-            && self.sidebar_display_w > 0.0
+        } else if !self.sidebar_open && !self.sidebar_panel.resizing && self.sidebar_display_w > 0.0
         {
             let diff = -self.sidebar_display_w;
             if diff.abs() > 0.4 {
@@ -595,7 +619,11 @@ impl PiShell {
 }
 
 impl PiShell {
-    pub fn render_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub fn render_shell(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         self.ensure_page(self.current_page, cx);
         self.settle(window, cx);
 
@@ -612,7 +640,11 @@ impl PiShell {
             .set_bounds(layout::RIGHT_PANEL_MIN_WIDTH, rp_max);
 
         let sb_open = self.sidebar_open;
-        let sb_width = if mobile { 292.0 } else { self.sidebar_display_w };
+        let sb_width = if mobile {
+            292.0
+        } else {
+            self.sidebar_display_w
+        };
 
         // 分隔条拖拽跟踪：分隔条 on_mouse_down 置 resizing 后，鼠标 move 事件
         // 由全尺寸 shell 根元素持续接收（指针可离开 12px 分隔条），up 收尾持久化。
@@ -694,7 +726,11 @@ impl PiShell {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let pal = self.palette();
-        let inner_w = if mobile { 292.0 } else { self.sidebar_panel.width };
+        let inner_w = if mobile {
+            292.0
+        } else {
+            self.sidebar_panel.width
+        };
 
         // 侧栏固定底部区（absolute 钉底）：本机 IP 卡 + 底部工具条(footer)，
         // 均不随导航滚动；与导航列表尾部不重复。
@@ -823,13 +859,13 @@ impl PiShell {
                     .flex()
                     .items_center()
                     .gap_1p5()
-                    .child(
-                        icons::icon(Icon::Wifi, 12.0).text_color(if ni.adapter_name.is_empty() {
+                    .child(icons::icon(Icon::Wifi, 12.0).text_color(
+                        if ni.adapter_name.is_empty() {
                             pal.text_dim
                         } else {
                             pal.success
-                        }),
-                    )
+                        },
+                    ))
                     .child(
                         div()
                             .flex_1()
@@ -919,9 +955,7 @@ impl PiShell {
             .gap(px(4.0))
             .max_w(px(150.0))
             .cursor_pointer()
-            .when(copyable, |s| {
-                s.hover(|s| s.text_color(pal.accent))
-            })
+            .when(copyable, |s| s.hover(|s| s.text_color(pal.accent)))
             .child(
                 div()
                     .max_w(px(130.0))
@@ -929,7 +963,11 @@ impl PiShell {
                     .text_size(px(10.5))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(text_color)
-                    .child(SharedString::from(if value.is_empty() { "—".to_string() } else { value.clone() })),
+                    .child(SharedString::from(if value.is_empty() {
+                        "—".to_string()
+                    } else {
+                        value.clone()
+                    })),
             )
             .when(copyable, |s| {
                 s.on_click(move |_ev, _w, cx| {
@@ -964,32 +1002,32 @@ impl PiShell {
             )
     }
 
-    fn render_sidebar_divider(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_sidebar_divider(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let this = cx.entity();
-        self.divider(
-            "pi-sidebar-divider",
-            self.sidebar_panel.resizing,
-            {
-                let this = this.clone();
-                move |x: f32, _w, cx| {
-                    let _ = this.update(cx, |t, _| t.sidebar_drag_down(x));
-                }
-            },
-        )
+        self.divider("pi-sidebar-divider", self.sidebar_panel.resizing, {
+            let this = this.clone();
+            move |x: f32, _w, cx| {
+                let _ = this.update(cx, |t, _| t.sidebar_drag_down(x));
+            }
+        })
     }
 
-    fn render_right_divider(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_right_divider(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let this = cx.entity();
-        self.divider(
-            "pi-right-divider",
-            self.right_panel.resizing,
-            {
-                let this = this.clone();
-                move |x: f32, _w, cx| {
-                    let _ = this.update(cx, |t, _| t.right_drag_down(x));
-                }
-            },
-        )
+        self.divider("pi-right-divider", self.right_panel.resizing, {
+            let this = this.clone();
+            move |x: f32, _w, cx| {
+                let _ = this.update(cx, |t, _| t.right_drag_down(x));
+            }
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1093,13 +1131,9 @@ impl PiShell {
         let viewport = f32::from(handle.bounds().size.height);
         // GPUI max_offset() 为 ≥0 的可滚动量（实测 probe 确认）；≤0 表示无溢出
         let max_off = f32::from(handle.max_offset().height);
-        let Some(new_off) = super::scroll_math::drag_to_offset(
-            viewport,
-            max_off,
-            start_py,
-            start_ratio,
-            pointer_y,
-        ) else {
+        let Some(new_off) =
+            super::scroll_math::drag_to_offset(viewport, max_off, start_py, start_ratio, pointer_y)
+        else {
             return;
         };
         handle.set_offset(gpui::point(gpui::px(0.0), gpui::px(new_off)));
@@ -1309,7 +1343,11 @@ impl PiShell {
             .ml(px(4.0))
             .rounded(px(7.0))
             .cursor_pointer()
-            .text_color(if self.right_open { pal.text } else { pal.text_muted })
+            .text_color(if self.right_open {
+                pal.text
+            } else {
+                pal.text_muted
+            })
             .bg(if self.right_open {
                 pal.bg_hover
             } else {
@@ -1319,9 +1357,14 @@ impl PiShell {
             .on_click(move |_ev, _w, cx| {
                 let _ = this.update(cx, |t, cx| t.toggle_right(cx));
             })
-            .child(icons::icon(Icon::Panel, 16.0).text_color(if self.right_open { pal.text } else { pal.text_muted }))
+            .child(
+                icons::icon(Icon::Panel, 16.0).text_color(if self.right_open {
+                    pal.text
+                } else {
+                    pal.text_muted
+                }),
+            )
     }
-
 }
 
 impl Render for PiShell {
@@ -1349,16 +1392,3 @@ fn fail_of(e: &secm_core::net_info::PublicIpEntry) -> String {
         String::new()
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-

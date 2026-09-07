@@ -25,8 +25,7 @@ pub struct ActivationInfo {
 }
 
 /// SPP 存储根路径（SoftwareProtectionPlatform 服务的数据存储）
-const SPP_KEY: &str =
-    r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\SoftwareProtectionPlatform";
+const SPP_KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\SoftwareProtectionPlatform";
 
 /// 激活产品查询条件（与现状 PowerShell 脚本一致）
 /// ApplicationId=55c92734-... 是 Windows 激活产品标识，PartialProductKey 过滤未配置产品
@@ -133,22 +132,16 @@ fn detect_license_status(_subkeys: &[String]) -> Option<u32> {
 /// - WMI 连接/查询失败 → `Err(CollectError::WinApi)`
 fn activation_from_wmi() -> Result<Option<ActivationInfo>, CollectError> {
     let conn = wmi::WMIConnection::new().map_err(|e| {
+        CollectError::winapi_detailed("WMI.CoCreateInstance", "连接 WMI 服务", format!("{}", e))
+    })?;
+
+    let products: Vec<SoftwareLicensingProduct> = conn.raw_query(ACTIVATION_WQL).map_err(|e| {
         CollectError::winapi_detailed(
-            "WMI.CoCreateInstance",
-            "连接 WMI 服务",
+            "WMI.ExecQuery",
+            "查询 SoftwareLicensingProduct",
             format!("{}", e),
         )
     })?;
-
-    let products: Vec<SoftwareLicensingProduct> = conn
-        .raw_query(ACTIVATION_WQL)
-        .map_err(|e| {
-            CollectError::winapi_detailed(
-                "WMI.ExecQuery",
-                "查询 SoftwareLicensingProduct",
-                format!("{}", e),
-            )
-        })?;
 
     // 取第一条匹配产品的 LicenseStatus（现状 PowerShell 也取首个输出行）
     for p in products {

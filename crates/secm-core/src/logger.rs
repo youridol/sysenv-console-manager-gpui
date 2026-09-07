@@ -132,14 +132,20 @@ fn write_log_file(level: &str, module: &str, message: &str) {
     // 日期变化或未打开 → 重开当天文件
     if guard.as_ref().map_or(true, |(d, _)| *d != today) {
         let dir = match std::env::var("LOCALAPPDATA") {
-            Ok(base) if !base.is_empty() => std::path::PathBuf::from(base).join("SECM").join("logs"),
+            Ok(base) if !base.is_empty() => {
+                std::path::PathBuf::from(base).join("SECM").join("logs")
+            }
             _ => return,
         };
         if std::fs::create_dir_all(&dir).is_err() {
             return;
         }
         let path = dir.join(format!("app-{}.log", today));
-        match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
             Ok(f) => *guard = Some((today, f)),
             Err(_) => {
                 // 打开失败置空，避免每条日志重试 IO

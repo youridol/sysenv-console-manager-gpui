@@ -152,11 +152,7 @@ fn map_err(e: secm_datasource::error::CollectError) -> CoreError {
         secm_datasource::error::CollectError::Parse { what, detail } => {
             CoreError::Parse { what, detail }
         }
-        secm_datasource::error::CollectError::NeedsAdmin { op } => {
-            CoreError::NeedsAdmin { op }
-        }
-        secm_datasource::error::CollectError::NotFound { what } => {
-            CoreError::NotFound { what }
-        }
+        secm_datasource::error::CollectError::NeedsAdmin { op } => CoreError::NeedsAdmin { op },
+        secm_datasource::error::CollectError::NotFound { what } => CoreError::NotFound { what },
     }
 }

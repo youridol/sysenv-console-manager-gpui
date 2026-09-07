@@ -31,9 +31,8 @@ pub fn apply_window_icon(hwnd: windows_sys::Win32::Foundation::HWND) {
     // MAKEINTRESOURCE 语义 = 整数 ID 转 PCWSTR（资源 ID 1）；
     // SendMessageW 目标为自身窗口句柄。
     unsafe {
-        let hinstance = windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(
-            std::ptr::null(),
-        );
+        let hinstance =
+            windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(std::ptr::null());
         if hinstance.is_null() {
             return;
         }

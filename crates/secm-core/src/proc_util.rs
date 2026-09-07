@@ -19,11 +19,13 @@ fn spawn_pipe_reader<R: std::io::Read + Send + 'static>(
     mut pipe: R,
 ) -> std::sync::mpsc::Receiver<Vec<u8>> {
     let (tx, rx) = std::sync::mpsc::channel();
-    let _ = std::thread::Builder::new().name("proc-reader".into()).spawn(move || {
-        let mut buf = Vec::new();
-        let _ = pipe.read_to_end(&mut buf);
-        let _ = tx.send(buf);
-    });
+    let _ = std::thread::Builder::new()
+        .name("proc-reader".into())
+        .spawn(move || {
+            let mut buf = Vec::new();
+            let _ = pipe.read_to_end(&mut buf);
+            let _ = tx.send(buf);
+        });
     rx
 }
 

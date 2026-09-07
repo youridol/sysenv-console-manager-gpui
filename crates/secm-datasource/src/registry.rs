@@ -121,11 +121,7 @@ struct QuickFixEngineering {
 /// 语义约定：查到 → `Ok(Some(PatchInfo))`；无数据 → `Ok(None)`；失败 → `Err`
 fn latest_patch_from_wmi() -> Result<Option<PatchInfo>, CollectError> {
     let conn = wmi::WMIConnection::new().map_err(|e| {
-        CollectError::winapi_detailed(
-            "WMI.CoCreateInstance",
-            "连接 WMI 服务",
-            format!("{}", e),
-        )
+        CollectError::winapi_detailed("WMI.CoCreateInstance", "连接 WMI 服务", format!("{}", e))
     })?;
 
     let patches: Vec<QuickFixEngineering> = conn
@@ -190,7 +186,10 @@ pub fn latest_patch() -> Result<Option<PatchInfo>, CollectError> {
             log::debug!("registry.latest_patch: 注册表无补丁记录，尝试 WMI 兜底");
         }
         Err(e) => {
-            log::warn!("registry.latest_patch: 注册表读取失败，尝试 WMI 兜底: {}", e);
+            log::warn!(
+                "registry.latest_patch: 注册表读取失败，尝试 WMI 兜底: {}",
+                e
+            );
         }
     }
 
@@ -416,7 +415,12 @@ pub fn enum_gpu_cards() -> Result<Vec<GpuCard>, CollectError> {
             continue;
         }
         let vendor = classify_vendor(&desc);
-        log::debug!("registry.enum_gpu_cards: 在 {} 发现 {} ({})", name, vendor, desc);
+        log::debug!(
+            "registry.enum_gpu_cards: 在 {} 发现 {} ({})",
+            name,
+            vendor,
+            desc
+        );
         cards.push(GpuCard {
             key: name,
             name: desc,

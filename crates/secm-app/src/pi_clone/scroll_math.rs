@@ -8,11 +8,7 @@
 // 抽出纯函数供 right_panel(几何) / shell(拖动) / 诊断 probe 共用同一实现。
 
 /// thumb 几何：(top, height, scrollable)
-pub fn thumb_geometry(
-    viewport: f32,
-    max_off: f32,
-    offset_y: f32,
-) -> (f32, f32, bool) {
+pub fn thumb_geometry(viewport: f32, max_off: f32, offset_y: f32) -> (f32, f32, bool) {
     if viewport <= 0.0 || max_off <= 0.0 {
         return (0.0, 0.0, false);
     }

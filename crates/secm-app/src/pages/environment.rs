@@ -9,9 +9,7 @@
 
 use gpui::prelude::*;
 use gpui::{div, px, Context, Render, SharedString, WeakEntity, Window};
-use secm_core::environment::{
-    self, AiToolsInfo, CheckStatus, DirectXInfo, DxCheck, VcRuntimeInfo,
-};
+use secm_core::environment::{self, AiToolsInfo, CheckStatus, DirectXInfo, DxCheck, VcRuntimeInfo};
 use secm_core::game_env::{self, GamePreset, GameSetting};
 use secm_core::sysinfo::{self, SystemInfo};
 
@@ -92,31 +90,33 @@ impl EnvironmentView {
         cx.notify();
 
         let weak: WeakEntity<Self> = cx.entity().downgrade();
-        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-            let exec = cx.background_executor().clone();
-            let data = exec
-                .spawn(async move {
-                    StaticEnvData {
-                        system: sysinfo::get_system_info(),
-                        dx: environment::check_directx(),
-                        vc: environment::check_vc_runtimes(),
-                        presets: game_env::get_game_presets(),
-                    }
-                })
-                .await;
-            if let Some(view) = weak.upgrade() {
-                view.update(cx, |this, cx| {
-                    this.static_loading = false;
-                    this.system = Some(data.system);
-                    this.dx = Some(data.dx);
-                    this.vc = Some(data.vc);
-                    this.presets = data.presets;
-                    this.status = String::new();
-                    cx.notify();
-                })
-                .ok();
-            }
-        })
+        cx.spawn(
+            async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let exec = cx.background_executor().clone();
+                let data = exec
+                    .spawn(async move {
+                        StaticEnvData {
+                            system: sysinfo::get_system_info(),
+                            dx: environment::check_directx(),
+                            vc: environment::check_vc_runtimes(),
+                            presets: game_env::get_game_presets(),
+                        }
+                    })
+                    .await;
+                if let Some(view) = weak.upgrade() {
+                    view.update(cx, |this, cx| {
+                        this.static_loading = false;
+                        this.system = Some(data.system);
+                        this.dx = Some(data.dx);
+                        this.vc = Some(data.vc);
+                        this.presets = data.presets;
+                        this.status = String::new();
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            },
+        )
         .detach();
     }
 
@@ -130,21 +130,23 @@ impl EnvironmentView {
         cx.notify();
 
         let weak: WeakEntity<Self> = cx.entity().downgrade();
-        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-            let exec = cx.background_executor().clone();
-            let result = exec
-                .spawn(async move { environment::check_ai_tools() })
-                .await;
-            if let Some(view) = weak.upgrade() {
-                view.update(cx, |this, cx| {
-                    this.ai_loading = false;
-                    this.ai = Some(result);
-                    this.status = String::new();
-                    cx.notify();
-                })
-                .ok();
-            }
-        })
+        cx.spawn(
+            async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let exec = cx.background_executor().clone();
+                let result = exec
+                    .spawn(async move { environment::check_ai_tools() })
+                    .await;
+                if let Some(view) = weak.upgrade() {
+                    view.update(cx, |this, cx| {
+                        this.ai_loading = false;
+                        this.ai = Some(result);
+                        this.status = String::new();
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            },
+        )
         .detach();
     }
 
@@ -171,53 +173,58 @@ impl EnvironmentView {
         cx.notify();
 
         let weak: WeakEntity<Self> = cx.entity().downgrade();
-        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-            let exec = cx.background_executor().clone();
-            // 注册表写全部在后台线程
-            let outcome = exec
-                .spawn(async move { apply_preset_settings(&preset_clone) })
-                .await;
+        cx.spawn(
+            async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let exec = cx.background_executor().clone();
+                // 注册表写全部在后台线程
+                let outcome = exec
+                    .spawn(async move { apply_preset_settings(&preset_clone) })
+                    .await;
 
-            if let Some(view) = weak.upgrade() {
-                view.update(cx, |this, cx| {
-                    this.applying = false;
-                    // P1-14：如实回显成功项数与失败明细
-                    let mut msg = if outcome.applied > 0 {
-                        format!("已应用「{}」预设（{} 项联动）", preset_name, outcome.applied)
-                    } else if outcome.failures.is_empty() {
-                        format!("「{}」全部达标，无需调整", preset_name)
-                    } else {
-                        format!("「{}」预设未应用任何变更", preset_name)
-                    };
-                    if !outcome.failures.is_empty() {
-                        msg.push_str(&format!(
-                            "；失败 {} 项: {}",
-                            outcome.failures.len(),
-                            outcome.failures.join("；")
-                        ));
-                    }
-                    // UI 侧日志：预设套用结果（有失败项 → warn）
-                    if outcome.failures.is_empty() {
-                        log::info!("环境检测 · 套用「{}」预设完成", preset_name);
-                    } else {
-                        log::warn!(
-                            "环境检测 · 套用「{}」预设部分失败（{} 项）: {}",
-                            preset_name,
-                            outcome.failures.len(),
-                            outcome.failures.join("；")
-                        );
-                    }
-                    this.status = msg;
-                    cx.notify();
-                })
-                .ok();
-                // 后台重读预设（当前值变化），不在主线程跑
-                view.update(cx, |this, cx| {
-                    this.start_static_load(cx);
-                })
-                .ok();
-            }
-        })
+                if let Some(view) = weak.upgrade() {
+                    view.update(cx, |this, cx| {
+                        this.applying = false;
+                        // P1-14：如实回显成功项数与失败明细
+                        let mut msg = if outcome.applied > 0 {
+                            format!(
+                                "已应用「{}」预设（{} 项联动）",
+                                preset_name, outcome.applied
+                            )
+                        } else if outcome.failures.is_empty() {
+                            format!("「{}」全部达标，无需调整", preset_name)
+                        } else {
+                            format!("「{}」预设未应用任何变更", preset_name)
+                        };
+                        if !outcome.failures.is_empty() {
+                            msg.push_str(&format!(
+                                "；失败 {} 项: {}",
+                                outcome.failures.len(),
+                                outcome.failures.join("；")
+                            ));
+                        }
+                        // UI 侧日志：预设套用结果（有失败项 → warn）
+                        if outcome.failures.is_empty() {
+                            log::info!("环境检测 · 套用「{}」预设完成", preset_name);
+                        } else {
+                            log::warn!(
+                                "环境检测 · 套用「{}」预设部分失败（{} 项）: {}",
+                                preset_name,
+                                outcome.failures.len(),
+                                outcome.failures.join("；")
+                            );
+                        }
+                        this.status = msg;
+                        cx.notify();
+                    })
+                    .ok();
+                    // 后台重读预设（当前值变化），不在主线程跑
+                    view.update(cx, |this, cx| {
+                        this.start_static_load(cx);
+                    })
+                    .ok();
+                }
+            },
+        )
         .detach();
     }
 
@@ -291,41 +298,51 @@ impl Render for EnvironmentView {
         let applying = self.applying;
 
         // 统一页面骨架：根容器（统一内边距/纵向节奏/超高纵向滚动）
-        page_root(&pal, "environment-page-root", &self.page_scroll, &cx.entity())
-            // 页头：标题/副标题居左，右侧动作区挂「重新检测」（id/回调/文案逻辑保持）
-            .child(
-                page_header(&pal, "环境检测", "系统信息 · 游戏环境预设 · DirectX / VC++ · AI 工具").child(
-                    button(&pal, ButtonKind::Secondary)
-                        .id("env-rescan")
-                        .child(if static_loading || ai_loading { "检测中…" } else { "重新检测" })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.rescan(cx);
-                        })),
-                ),
+        page_root(
+            &pal,
+            "environment-page-root",
+            &self.page_scroll,
+            &cx.entity(),
+        )
+        // 页头：标题/副标题居左，右侧动作区挂「重新检测」（id/回调/文案逻辑保持）
+        .child(
+            page_header(
+                &pal,
+                "环境检测",
+                "系统信息 · 游戏环境预设 · DirectX / VC++ · AI 工具",
             )
-            // 状态
-            .when(!status.is_empty(), |s| {
-                let msg = status.clone();
-                s.child(banner(&pal, BannerKind::Info, msg))
-            })
-            // 系统信息卡
-            .child(self.system_card(&pal, &sys))
-            // 游戏环境预设
-            .child(self.presets_section(&pal, &presets, applying, cx))
-            // DirectX + VC++ 双列（flex 等宽两列；禁 grid —— taffy grid 滚动容器内不渲染）
             .child(
-                div()
-                    .flex()
-                    .gap_4()
-                    .child(
-                        div().flex_1().min_w(px(0.0)).child(self.dx_card(&pal, &dx)),
-                    )
-                    .child(
-                        div().flex_1().min_w(px(0.0)).child(self.vc_card(&pal, &vc)),
-                    ),
-            )
-            // AI 工具卡
-            .child(self.ai_card(&pal, &ai, ai_loading, cx))
+                button(&pal, ButtonKind::Secondary)
+                    .id("env-rescan")
+                    .child(if static_loading || ai_loading {
+                        "检测中…"
+                    } else {
+                        "重新检测"
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.rescan(cx);
+                    })),
+            ),
+        )
+        // 状态
+        .when(!status.is_empty(), |s| {
+            let msg = status.clone();
+            s.child(banner(&pal, BannerKind::Info, msg))
+        })
+        // 系统信息卡
+        .child(self.system_card(&pal, &sys))
+        // 游戏环境预设
+        .child(self.presets_section(&pal, &presets, applying, cx))
+        // DirectX + VC++ 双列（flex 等宽两列；禁 grid —— taffy grid 滚动容器内不渲染）
+        .child(
+            div()
+                .flex()
+                .gap_4()
+                .child(div().flex_1().min_w(px(0.0)).child(self.dx_card(&pal, &dx)))
+                .child(div().flex_1().min_w(px(0.0)).child(self.vc_card(&pal, &vc))),
+        )
+        // AI 工具卡
+        .child(self.ai_card(&pal, &ai, ai_loading, cx))
     }
 }
 
@@ -344,17 +361,23 @@ impl EnvironmentView {
             ("内部版本", format!("{} · UBR {}", s.build_number, s.ubr)),
             ("系统架构", s.arch.clone()),
             ("安装日期", s.install_date.clone()),
-            ("激活状态", format!("{}（{}）", s.activation.label, s.activation.status_raw)),
-            ("最新补丁", format!("{} · {}", s.latest_patch.kb, s.latest_patch.title_cn)),
+            (
+                "激活状态",
+                format!("{}（{}）", s.activation.label, s.activation.status_raw),
+            ),
+            (
+                "最新补丁",
+                format!("{} · {}", s.latest_patch.kb, s.latest_patch.title_cn),
+            ),
             ("启动模式", s.boot_mode.clone()),
         ];
         card(pal)
             .child(card_header(pal, "系统信息"))
             .child(card_divider(pal))
             // 键值行统一走 kv_row 节奏（原行分隔线去掉，标签定宽 100 对齐）
-            .child(card_body(pal).children(rows.into_iter().map(|(k, v)| {
-                kv_row_w(pal, 100.0, k, v)
-            })))
+            .child(
+                card_body(pal).children(rows.into_iter().map(|(k, v)| kv_row_w(pal, 100.0, k, v))),
+            )
             .into_any_element()
     }
 
@@ -429,8 +452,16 @@ impl EnvironmentView {
                                     .child(
                                         div()
                                             .text_size(px(11.5))
-                                            .text_color(if ok_all { pal.success } else { pal.warning })
-                                            .child(if ok_all { "全部达标" } else { "有未达标项" }),
+                                            .text_color(if ok_all {
+                                                pal.success
+                                            } else {
+                                                pal.warning
+                                            })
+                                            .child(if ok_all {
+                                                "全部达标"
+                                            } else {
+                                                "有未达标项"
+                                            }),
                                     ),
                             )
                             .child(apply_btn),
@@ -447,12 +478,11 @@ impl EnvironmentView {
                             .gap_2()
                             .px_1()
                             .py_1()
-                            .child(
-                                div()
-                                    .size(px(6.0))
-                                    .rounded_full()
-                                    .bg(if ok { pal.success } else { pal.warning }),
-                            )
+                            .child(div().size(px(6.0)).rounded_full().bg(if ok {
+                                pal.success
+                            } else {
+                                pal.warning
+                            }))
                             .child(
                                 div()
                                     .w(px(150.0))
@@ -544,12 +574,11 @@ impl EnvironmentView {
                             .items_center()
                             .gap_2()
                             .py_0p5()
-                            .child(
-                                div()
-                                    .size(px(6.0))
-                                    .rounded_full()
-                                    .bg(if installed { pal.success } else { pal.danger }),
-                            )
+                            .child(div().size(px(6.0)).rounded_full().bg(if installed {
+                                pal.success
+                            } else {
+                                pal.danger
+                            }))
                             .child(
                                 div()
                                     .flex_1()
@@ -566,8 +595,16 @@ impl EnvironmentView {
                             .child(
                                 div()
                                     .text_size(px(11.5))
-                                    .text_color(if installed { pal.text_muted } else { pal.danger })
-                                    .child(if installed { ver } else { "未安装".to_string() }),
+                                    .text_color(if installed {
+                                        pal.text_muted
+                                    } else {
+                                        pal.danger
+                                    })
+                                    .child(if installed {
+                                        ver
+                                    } else {
+                                        "未安装".to_string()
+                                    }),
                             )
                     })),
             )
@@ -595,62 +632,61 @@ impl EnvironmentView {
                 let tools = info.tools;
                 let checks: Vec<DxCheck> = info.checks;
                 s.children(checks.iter().map(|c| self.check_row(pal, c)))
-                    .child(
+                    .child(div().flex_col().children(tools.into_iter().map(|t| {
+                        let name = t.display_name;
+                        let cmd = t.name;
+                        let installed = t.installed;
+                        let version = t.version;
+                        let upgradable = t.upgradable;
                         div()
-                            .flex_col()
-                            .children(tools.into_iter().map(|t| {
-                                let name = t.display_name;
-                                let cmd = t.name;
-                                let installed = t.installed;
-                                let version = t.version;
-                                let upgradable = t.upgradable;
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_5()
+                            .py_1p5()
+                            .border_b_1()
+                            .border_color(pal.border)
+                            .child(div().size(px(6.0)).rounded_full().bg(if installed {
+                                pal.success
+                            } else {
+                                pal.text_muted
+                            }))
+                            .child(
                                 div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .px_5()
-                                    .py_1p5()
-                                    .border_b_1()
-                                    .border_color(pal.border)
-                                    .child(
-                                        div()
-                                            .size(px(6.0))
-                                            .rounded_full()
-                                            .bg(if installed { pal.success } else { pal.text_muted }),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(px(130.0))
-                                            .flex_none()
-                                            .text_size(px(12.5))
-                                            .text_color(pal.text)
-                                            .child(name),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(px(90.0))
-                                            .flex_none()
-                                            .text_size(px(11.0))
-                                            .text_color(pal.text_muted)
-                                            .child(cmd),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .text_size(px(12.0))
-                                            .text_color(pal.text_muted)
-                                            .child(if installed { version } else { "未安装".to_string() }),
-                                    )
-                                    .when(installed && upgradable, |r| {
-                                        r.child(
-                                            div()
-                                                .text_size(px(11.0))
-                                                .text_color(pal.warning)
-                                                .child("可升级"),
-                                        )
-                                    })
-                            })),
-                    )
+                                    .w(px(130.0))
+                                    .flex_none()
+                                    .text_size(px(12.5))
+                                    .text_color(pal.text)
+                                    .child(name),
+                            )
+                            .child(
+                                div()
+                                    .w(px(90.0))
+                                    .flex_none()
+                                    .text_size(px(11.0))
+                                    .text_color(pal.text_muted)
+                                    .child(cmd),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(12.0))
+                                    .text_color(pal.text_muted)
+                                    .child(if installed {
+                                        version
+                                    } else {
+                                        "未安装".to_string()
+                                    }),
+                            )
+                            .when(installed && upgradable, |r| {
+                                r.child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .text_color(pal.warning)
+                                        .child("可升级"),
+                                )
+                            })
+                    })))
             })
     }
 }
@@ -704,10 +740,7 @@ fn apply_preset_settings(preset: &GamePreset) -> PresetApplyOutcome {
                             });
                         match target {
                             Some(plan) => settings::set_power_plan(&plan.guid).map(|_| ()),
-                            None => Err(format!(
-                                "未找到推荐电源计划（推荐: {}）",
-                                s.recommended
-                            )),
+                            None => Err(format!("未找到推荐电源计划（推荐: {}）", s.recommended)),
                         }
                     }
                 }

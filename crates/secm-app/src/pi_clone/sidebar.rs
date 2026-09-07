@@ -9,8 +9,8 @@
 // 导航分组标题下方不再渲染重复的快捷图标条（与底部 footer 重复，已按用户指令移除），
 // 底部工具条由外层壳统一置底渲染一份。
 
-use gpui::{div, px, FontWeight, InteractiveElement, ParentElement, Styled, Window};
 use gpui::prelude::*;
+use gpui::{div, px, FontWeight, InteractiveElement, ParentElement, Styled, Window};
 use gpui::{Context, SharedString};
 
 use super::icons::{self, Icon};
@@ -20,7 +20,11 @@ use super::PiShell;
 
 impl PiShell {
     /// Sidebar 内部内容（外层负责开合裁剪/抽屉位移）
-    pub fn render_sidebar_inner(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub fn render_sidebar_inner(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let pal = self.palette();
         let width = self.sidebar_panel.width.max(0.0);
 
@@ -46,54 +50,49 @@ impl PiShell {
     /// 头部：品牌/拖动行 + controls（主题/折叠）
     /// 无标题栏后，品牌行整行（含顶部，无留白）为窗口拖动热区（按钮区除外）。
     fn sidebar_header(&self, pal: &Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex_col()
-            .w_full()
-            .pb(px(2.0))
-            .gap(px(2.0))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .w_full()
-                    .h(px(34.0))
-                    .px(px(4.0))
-                    .gap(px(4.0))
-                    // 可拖动标题区（logo + 全称 + 弹性空白），占满到按钮前
-                    // 无标题栏：按下时发起系统窗口拖动
-                    .child(
-                        div()
-                            .id("pi-sidebar-drag")
-                            .flex()
-                            .items_center()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .h_full()
-                            .gap(px(6.0))
-                            .window_control_area(gpui::WindowControlArea::Drag)
-                            .child(
-                                div()
-                                    .size(px(14.0))
-                                    .rounded(px(4.0))
-                                    .bg(pal.accent)
-                                    .flex()
-                                    .items_center()
-                                    .justify_center(),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .truncate()
-                                    .text_size(px(11.5))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(pal.text)
-                                    .child(SharedString::from("SysEnv Console Manager")),
-                            ),
-                    )
-                    .child(self.chrome_theme_button(pal, cx))
-                    .child(self.chrome_collapse_button(pal, cx)),
-            )
+        div().flex_col().w_full().pb(px(2.0)).gap(px(2.0)).child(
+            div()
+                .flex()
+                .items_center()
+                .w_full()
+                .h(px(34.0))
+                .px(px(4.0))
+                .gap(px(4.0))
+                // 可拖动标题区（logo + 全称 + 弹性空白），占满到按钮前
+                // 无标题栏：按下时发起系统窗口拖动
+                .child(
+                    div()
+                        .id("pi-sidebar-drag")
+                        .flex()
+                        .items_center()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .h_full()
+                        .gap(px(6.0))
+                        .window_control_area(gpui::WindowControlArea::Drag)
+                        .child(
+                            div()
+                                .size(px(14.0))
+                                .rounded(px(4.0))
+                                .bg(pal.accent)
+                                .flex()
+                                .items_center()
+                                .justify_center(),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .truncate()
+                                .text_size(px(11.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(pal.text)
+                                .child(SharedString::from("SysEnv Console Manager")),
+                        ),
+                )
+                .child(self.chrome_theme_button(pal, cx))
+                .child(self.chrome_collapse_button(pal, cx)),
+        )
     }
 
     fn chrome_theme_button(&self, pal: &Palette, cx: &mut Context<Self>) -> impl IntoElement {
@@ -143,10 +142,19 @@ impl PiShell {
             .flex_col()
             .h_full()
             .overflow_y_scroll()
-            .children(NAV_GROUPS.iter().map(|group| self.nav_group(*group, pal, cx)))
+            .children(
+                NAV_GROUPS
+                    .iter()
+                    .map(|group| self.nav_group(*group, pal, cx)),
+            )
     }
 
-    fn nav_group(&self, group: NavGroup, pal: &Palette, cx: &mut Context<Self>) -> impl IntoElement {
+    fn nav_group(
+        &self,
+        group: NavGroup,
+        pal: &Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         div()
             .flex_col()
             .child(
@@ -183,15 +191,27 @@ impl PiShell {
             .rounded(px(8.0))
             .cursor_pointer()
             .text_color(if active { pal.text } else { pal.text_muted })
-            .bg(if active { pal.bg_selected } else { super::theme::TRANSPARENT })
-            .hover(|s| s.bg(if active { pal.bg_selected } else { pal.bg_hover }).text_color(pal.text))
+            .bg(if active {
+                pal.bg_selected
+            } else {
+                super::theme::TRANSPARENT
+            })
+            .hover(|s| {
+                s.bg(if active {
+                    pal.bg_selected
+                } else {
+                    pal.bg_hover
+                })
+                .text_color(pal.text)
+            })
             .on_click(move |_ev, _w, cx| {
                 let _ = this.update(cx, |t, cx| t.navigate_to(page, cx));
             })
-            .child(
-                icons::icon(page.icon(), 14.0)
-                    .text_color(if active { pal.text } else { pal.text_muted }),
-            )
+            .child(icons::icon(page.icon(), 14.0).text_color(if active {
+                pal.text
+            } else {
+                pal.text_muted
+            }))
             .child(
                 div()
                     .flex_1()
@@ -207,7 +227,11 @@ impl PiShell {
     }
 
     /// Sidebar footer：设置入口（保留参考外壳的扁平工具按钮）
-    pub(crate) fn sidebar_footer(&self, pal: &Palette, _cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn sidebar_footer(
+        &self,
+        pal: &Palette,
+        _cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         div()
             .flex()
             .items_center()
@@ -239,19 +263,3 @@ impl PiShell {
             .child(icons::icon(icon, 14.0).text_color(pal.text_muted))
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

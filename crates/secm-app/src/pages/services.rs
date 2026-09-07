@@ -7,8 +7,8 @@
 // 呈现层：统一接入 crate::ui::page 布局框架，色板取自 pi_clone::theme::Palette
 // （明暗双主题，随壳 set_appearance 联动），禁止硬编码业务色。
 
-use gpui::{div, px, Entity, SharedString, Window, Context, Render, WeakEntity};
 use gpui::prelude::*;
+use gpui::{div, px, Context, Entity, Render, SharedString, WeakEntity, Window};
 use secm_core::settings::{self, ServiceInfo};
 
 use crate::pi_clone::theme::{Appearance, Palette};
@@ -80,43 +80,47 @@ impl ServicesView {
         cx.notify();
 
         let weak: WeakEntity<Self> = cx.entity().downgrade();
-        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-            let exec = cx.background_executor().clone();
-            let services = exec
-                .spawn(async move { settings::list_all_services().unwrap_or_default() })
-                .await;
-            // UI 侧日志：服务枚举完成（记录枚举到的数量）
-            log::info!("服务管理 · 服务枚举完成，共 {} 个服务", services.len());
-            if let Some(view) = weak.upgrade() {
-                view.update(cx, |this, cx| {
-                    this.loading = false;
-                    this.services = services;
-                    this.status = SharedString::from("");
-                    cx.notify();
-                })
-                .ok();
-            }
-        })
+        cx.spawn(
+            async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let exec = cx.background_executor().clone();
+                let services = exec
+                    .spawn(async move { settings::list_all_services().unwrap_or_default() })
+                    .await;
+                // UI 侧日志：服务枚举完成（记录枚举到的数量）
+                log::info!("服务管理 · 服务枚举完成，共 {} 个服务", services.len());
+                if let Some(view) = weak.upgrade() {
+                    view.update(cx, |this, cx| {
+                        this.loading = false;
+                        this.services = services;
+                        this.status = SharedString::from("");
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            },
+        )
         .detach();
     }
 
     /// 延迟 800ms 后台刷新（启停/启动类型异步生效）
     fn reload_later(&mut self, cx: &mut Context<Self>) {
         let weak: WeakEntity<Self> = cx.entity().downgrade();
-        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-            gpui::Timer::after(std::time::Duration::from_millis(800)).await;
-            let exec = cx.background_executor().clone();
-            let services = exec
-                .spawn(async move { settings::list_all_services().unwrap_or_default() })
-                .await;
-            if let Some(view) = weak.upgrade() {
-                view.update(cx, |this, cx| {
-                    this.services = services;
-                    cx.notify();
-                })
-                .ok();
-            }
-        })
+        cx.spawn(
+            async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                gpui::Timer::after(std::time::Duration::from_millis(800)).await;
+                let exec = cx.background_executor().clone();
+                let services = exec
+                    .spawn(async move { settings::list_all_services().unwrap_or_default() })
+                    .await;
+                if let Some(view) = weak.upgrade() {
+                    view.update(cx, |this, cx| {
+                        this.services = services;
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            },
+        )
         .detach();
     }
 
@@ -128,8 +132,7 @@ impl ServicesView {
         self.services
             .iter()
             .filter(|s| {
-                s.name.to_lowercase().contains(&kw)
-                    || s.display_name.to_lowercase().contains(&kw)
+                s.name.to_lowercase().contains(&kw) || s.display_name.to_lowercase().contains(&kw)
             })
             .collect()
     }
@@ -141,12 +144,7 @@ impl ServicesView {
     }
 
     /// 启停/启动类型（后台系统 API + 延迟刷新）
-    fn op_service(
-        &mut self,
-        name: &str,
-        op: ServiceOp,
-        cx: &mut Context<Self>,
-    ) {
+    fn op_service(&mut self, name: &str, op: ServiceOp, cx: &mut Context<Self>) {
         if self.op_busy {
             return;
         }
@@ -159,47 +157,49 @@ impl ServicesView {
         let name_log = name_c.clone();
         let op_c = op;
         let op_label = op.label().to_string();
-        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-            let exec = cx.background_executor().clone();
-            let result = exec
-                .spawn(async move {
-                    match op_c {
-                        ServiceOp::Start => settings::start_service(&name_c),
-                        ServiceOp::Stop => settings::stop_service(&name_c),
-                        ServiceOp::ToggleAuto => {
-                            settings::set_service_start_type(&name_c, "auto")
+        cx.spawn(
+            async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let exec = cx.background_executor().clone();
+                let result = exec
+                    .spawn(async move {
+                        match op_c {
+                            ServiceOp::Start => settings::start_service(&name_c),
+                            ServiceOp::Stop => settings::stop_service(&name_c),
+                            ServiceOp::ToggleAuto => {
+                                settings::set_service_start_type(&name_c, "auto")
+                            }
+                            ServiceOp::ToggleManual => {
+                                settings::set_service_start_type(&name_c, "manual")
+                            }
+                            ServiceOp::ToggleDisable => {
+                                settings::set_service_start_type(&name_c, "disabled")
+                            }
                         }
-                        ServiceOp::ToggleManual => {
-                            settings::set_service_start_type(&name_c, "manual")
-                        }
-                        ServiceOp::ToggleDisable => {
-                            settings::set_service_start_type(&name_c, "disabled")
-                        }
-                    }
-                })
-                .await;
-            // UI 侧日志：服务启停/启动类型操作结果
-            match &result {
-                Ok(msg) => log::info!("服务管理 · 已{}服务 {}：{}", op_label, name_log, msg),
-                Err(e) => log::warn!("服务管理 · {}服务 {} 失败: {}", op_label, name_log, e),
-            }
-            if let Some(view) = weak.upgrade() {
-                view.update(cx, |this, cx| {
-                    this.op_busy = false;
-                    this.status = match result {
-                        Ok(msg) => SharedString::from(msg),
-                        Err(e) => SharedString::from(e),
-                    };
-                    cx.notify();
-                })
-                .ok();
-                view.update(cx, |this, cx| {
-                    // 延迟后台刷新（服务状态异步变化）
-                    this.reload_later(cx);
-                })
-                .ok();
-            }
-        })
+                    })
+                    .await;
+                // UI 侧日志：服务启停/启动类型操作结果
+                match &result {
+                    Ok(msg) => log::info!("服务管理 · 已{}服务 {}：{}", op_label, name_log, msg),
+                    Err(e) => log::warn!("服务管理 · {}服务 {} 失败: {}", op_label, name_log, e),
+                }
+                if let Some(view) = weak.upgrade() {
+                    view.update(cx, |this, cx| {
+                        this.op_busy = false;
+                        this.status = match result {
+                            Ok(msg) => SharedString::from(msg),
+                            Err(e) => SharedString::from(e),
+                        };
+                        cx.notify();
+                    })
+                    .ok();
+                    view.update(cx, |this, cx| {
+                        // 延迟后台刷新（服务状态异步变化）
+                        this.reload_later(cx);
+                    })
+                    .ok();
+                }
+            },
+        )
         .detach();
     }
 
@@ -300,11 +300,7 @@ impl ServicesView {
                     .child("🔍"),
             )
             // 真实输入框（P2：搜索功能接线）
-            .child(
-                div()
-                    .flex_1()
-                    .child(self.search_input.clone()),
-            )
+            .child(div().flex_1().child(self.search_input.clone()))
     }
 
     /// 单行服务数据（单元格列宽与表头完全一致：80/Flex/260/90/120）
@@ -363,8 +359,20 @@ impl ServicesView {
                     .w(px(120.0))
                     .flex()
                     .gap_1()
-                    .child(service_action_button(pal, "启动", name.clone(), ServiceOp::Start, cx))
-                    .child(service_action_button(pal, "停止", name.clone(), ServiceOp::Stop, cx)),
+                    .child(service_action_button(
+                        pal,
+                        "启动",
+                        name.clone(),
+                        ServiceOp::Start,
+                        cx,
+                    ))
+                    .child(service_action_button(
+                        pal,
+                        "停止",
+                        name.clone(),
+                        ServiceOp::Stop,
+                        cx,
+                    )),
             )
     }
 }

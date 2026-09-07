@@ -39,18 +39,16 @@ pub fn read_registry_dword(hive: &str, key: &str, value: &str) -> Result<u32, St
     let subkey = RegKey::predef(hkey)
         .open_subkey_with_flags(key, KEY_READ | KEY_WOW64_64KEY)
         .map_err(|e| format!("[REG_OPEN_ERR] 无法打开: {}\\{} | {}", hive, key, e))?;
-    subkey
-        .get_value(value)
-        .map_err(|e| format!("[REG_VALUE_ERR] 无法读取 '{}': {}\\{} | {}", value, hive, key, e))
+    subkey.get_value(value).map_err(|e| {
+        format!(
+            "[REG_VALUE_ERR] 无法读取 '{}': {}\\{} | {}",
+            value, hive, key, e
+        )
+    })
 }
 
 /// 写入 DWORD（HKLM 需管理员；key 不存在自动创建）
-pub fn write_registry_dword(
-    hive: &str,
-    key: &str,
-    value: &str,
-    data: u32,
-) -> Result<(), String> {
+pub fn write_registry_dword(hive: &str, key: &str, value: &str, data: u32) -> Result<(), String> {
     use winreg::enums::*;
     use winreg::RegKey;
     let hkey = match hive.to_uppercase().as_str() {
@@ -546,10 +544,9 @@ fn read_power_scheme_name(guid: &str) -> String {
         r"SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes\{}",
         guid
     );
-    if let Ok(key) = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey_with_flags(
-        &path,
-        KEY_READ | KEY_WOW64_64KEY,
-    ) {
+    if let Ok(key) =
+        RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey_with_flags(&path, KEY_READ | KEY_WOW64_64KEY)
+    {
         if let Ok(name) = key.get_value::<String, _>("FriendlyName") {
             return name;
         }
@@ -708,10 +705,7 @@ pub fn set_hetero_policy(kind: &str, value: u32) -> Result<(), String> {
         Ok(Some(active)) => {
             if let Err(e) = power::set_active_scheme(&active) {
                 // 值已写入但未生效：如实提示，不谎报成功（重开应用/重启后生效）
-                return Err(format!(
-                    "异类策略已写入但激活刷新失败（重启后生效）: {}",
-                    e
-                ));
+                return Err(format!("异类策略已写入但激活刷新失败（重启后生效）: {}", e));
             }
         }
         Ok(None) => {
@@ -750,8 +744,7 @@ pub use secm_datasource::service::ServiceInfo;
 
 /// 枚举全部服务
 pub fn list_all_services() -> Result<Vec<ServiceInfo>, String> {
-    secm_datasource::service::enum_services()
-        .map_err(|e| format!("枚举服务失败: {}", e))
+    secm_datasource::service::enum_services().map_err(|e| format!("枚举服务失败: {}", e))
 }
 
 /// 启动服务（需管理员；幂等）

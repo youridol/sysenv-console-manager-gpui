@@ -4,16 +4,16 @@
 // 渲染层统一走 crate::ui::page 布局框架，色板取 pi_clone::theme::Palette（明暗随壳联动）。
 
 use gpui::prelude::*;
-use gpui::{div, px, SharedString, Window, Context, Render, Entity, WeakEntity};
-use secm_core::netif::{self, AdapterConfig};
+use gpui::{div, px, Context, Entity, Render, SharedString, WeakEntity, Window};
 use secm_core::net_config::{self, ApplyStep};
+use secm_core::netif::{self, AdapterConfig};
 
 use crate::pi_clone::theme::{Appearance, Palette};
 use crate::ui::page::{
     banner, button, card, card_body, card_divider, card_header, field_label, kv_row_w, page_header,
     page_root, status_pill, BannerKind, ButtonKind,
 };
-use crate::ui::text_input::{TextField, ChangeText};
+use crate::ui::text_input::{ChangeText, TextField};
 
 pub struct NetConfigView {
     /// 页面外观，随壳主题联动
@@ -63,9 +63,12 @@ impl NetConfigView {
             ipv6_input.clone(),
             ipv6_gw_input.clone(),
         ] {
-            cx.subscribe(&field, |_this, _field: Entity<TextField>, _ev: &ChangeText, cx| {
-                cx.notify();
-            })
+            cx.subscribe(
+                &field,
+                |_this, _field: Entity<TextField>, _ev: &ChangeText, cx| {
+                    cx.notify();
+                },
+            )
             .detach();
         }
 
@@ -102,34 +105,36 @@ impl NetConfigView {
         cx.notify();
 
         let weak: WeakEntity<Self> = cx.entity().downgrade();
-        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-            let exec = cx.background_executor().clone();
-            let adapters = exec
-                .spawn(async move { netif::list_adapters().unwrap_or_default() })
-                .await;
-            if let Some(view) = weak.upgrade() {
-                view.update(cx, |this, cx| {
-                    this.loading_adapters = false;
-                    this.adapters = adapters;
-                    // 保持当前选中（若仍存在），否则自动选首个 Up 接口
-                    let keep = this
-                        .selected
-                        .as_ref()
-                        .map(|cur| this.adapters.iter().any(|a| &a.name == cur))
-                        .unwrap_or(false);
-                    if !keep {
-                        this.selected = this
-                            .adapters
-                            .iter()
-                            .find(|a| a.status == "Up")
-                            .map(|a| a.name.clone())
-                            .or_else(|| this.adapters.first().map(|a| a.name.clone()));
-                    }
-                    cx.notify();
-                })
-                .ok();
-            }
-        })
+        cx.spawn(
+            async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let exec = cx.background_executor().clone();
+                let adapters = exec
+                    .spawn(async move { netif::list_adapters().unwrap_or_default() })
+                    .await;
+                if let Some(view) = weak.upgrade() {
+                    view.update(cx, |this, cx| {
+                        this.loading_adapters = false;
+                        this.adapters = adapters;
+                        // 保持当前选中（若仍存在），否则自动选首个 Up 接口
+                        let keep = this
+                            .selected
+                            .as_ref()
+                            .map(|cur| this.adapters.iter().any(|a| &a.name == cur))
+                            .unwrap_or(false);
+                        if !keep {
+                            this.selected = this
+                                .adapters
+                                .iter()
+                                .find(|a| a.status == "Up")
+                                .map(|a| a.name.clone())
+                                .or_else(|| this.adapters.first().map(|a| a.name.clone()));
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            },
+        )
         .detach();
     }
 
@@ -179,40 +184,42 @@ impl NetConfigView {
         cx.notify();
 
         let weak: WeakEntity<Self> = cx.entity().downgrade();
-        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-            let exec = cx.background_executor().clone();
-            let result = exec
-                .spawn(async move { net_config::apply_network_config(&req) })
-                .await;
-            // UI 侧日志：网络配置应用结果（部分失败用 warn）
-            if result.all_ok {
-                log::info!("网络配置 · 配置应用成功（{} 项）", result.steps.len());
-            } else {
-                let failed: Vec<&str> = result
-                    .steps
-                    .iter()
-                    .filter(|s| !s.ok)
-                    .map(|s| s.name.as_str())
-                    .collect();
-                log::warn!(
-                    "网络配置 · 配置应用失败步骤（{}）: {}",
-                    failed.len(),
-                    failed.join("，")
-                );
-            }
-            if let Some(view) = weak.upgrade() {
-                view.update(cx, |this, cx| {
-                    this.applying = false;
-                    this.apply_result(result, cx);
-                })
-                .ok();
-                // netsh 生效后延迟后台刷新配置
-                view.update(cx, |this, cx| {
-                    this.schedule_refresh(cx);
-                })
-                .ok();
-            }
-        })
+        cx.spawn(
+            async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let exec = cx.background_executor().clone();
+                let result = exec
+                    .spawn(async move { net_config::apply_network_config(&req) })
+                    .await;
+                // UI 侧日志：网络配置应用结果（部分失败用 warn）
+                if result.all_ok {
+                    log::info!("网络配置 · 配置应用成功（{} 项）", result.steps.len());
+                } else {
+                    let failed: Vec<&str> = result
+                        .steps
+                        .iter()
+                        .filter(|s| !s.ok)
+                        .map(|s| s.name.as_str())
+                        .collect();
+                    log::warn!(
+                        "网络配置 · 配置应用失败步骤（{}）: {}",
+                        failed.len(),
+                        failed.join("，")
+                    );
+                }
+                if let Some(view) = weak.upgrade() {
+                    view.update(cx, |this, cx| {
+                        this.applying = false;
+                        this.apply_result(result, cx);
+                    })
+                    .ok();
+                    // netsh 生效后延迟后台刷新配置
+                    view.update(cx, |this, cx| {
+                        this.schedule_refresh(cx);
+                    })
+                    .ok();
+                }
+            },
+        )
         .detach();
     }
 
@@ -271,7 +278,12 @@ impl NetConfigView {
             cx.notify();
             return;
         }
-        log::info!("网络配置 · 应用静态 IPv4 {} / {} 到适配器 {}", ip.trim(), mask.trim(), name);
+        log::info!(
+            "网络配置 · 应用静态 IPv4 {} / {} 到适配器 {}",
+            ip.trim(),
+            mask.trim(),
+            name
+        );
         // DNS 解析逗号/空格分隔列表
         let dns_list: Vec<String> = dns_text
             .split([',', '，', ' '])
@@ -291,7 +303,11 @@ impl NetConfigView {
                     Some(gateway.trim().to_string())
                 },
             }],
-            mode_dns4: if dns_list.is_empty() { "dhcp".into() } else { "static".into() },
+            mode_dns4: if dns_list.is_empty() {
+                "dhcp".into()
+            } else {
+                "static".into()
+            },
             dns4: dns_list,
             mode_v6: "dhcp".into(),
             ipv6: None,
@@ -327,8 +343,16 @@ impl NetConfigView {
             mode_dns4: "dhcp".into(),
             dns4: vec![],
             mode_v6: "static".into(),
-            ipv6: if ipv6.trim().is_empty() { None } else { Some(ipv6.trim().to_string()) },
-            ipv6_gateway: if gw6.trim().is_empty() { None } else { Some(gw6.trim().to_string()) },
+            ipv6: if ipv6.trim().is_empty() {
+                None
+            } else {
+                Some(ipv6.trim().to_string())
+            },
+            ipv6_gateway: if gw6.trim().is_empty() {
+                None
+            } else {
+                Some(gw6.trim().to_string())
+            },
             mode_dns6: "dhcp".into(),
             dns6: vec![],
         };
@@ -356,7 +380,11 @@ impl NetConfigView {
             cx.notify();
             return;
         }
-        log::info!("网络配置 · 修改适配器 {} MAC 为 {}", adapter.name, mac.trim());
+        log::info!(
+            "网络配置 · 修改适配器 {} MAC 为 {}",
+            adapter.name,
+            mac.trim()
+        );
         // 后台执行（netsh 禁启用网卡可能阻塞数百 ms）
         let weak = cx.entity().downgrade();
         let mac_v = mac.trim().to_string();
@@ -368,9 +396,7 @@ impl NetConfigView {
             let name2 = name_v.clone();
             let guid2 = guid_v.clone();
             let result = exec
-                .spawn(async move {
-                    net_config::set_network_mac(&name2, &mac2, guid2.as_deref())
-                })
+                .spawn(async move { net_config::set_network_mac(&name2, &mac2, guid2.as_deref()) })
                 .await;
             // UI 侧日志：MAC 修改结果
             match &result {
@@ -402,15 +428,17 @@ impl NetConfigView {
     /// 延迟后台刷新适配器配置（netsh 生效后）
     fn schedule_refresh(&mut self, cx: &mut Context<Self>) {
         let weak = cx.entity().downgrade();
-        cx.spawn(async move |_this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-            gpui::Timer::after(std::time::Duration::from_millis(1500)).await;
-            if let Some(view) = weak.upgrade() {
-                view.update(cx, |this, cx| {
-                    this.refresh(cx);
-                })
-                .ok();
-            }
-        })
+        cx.spawn(
+            async move |_this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                gpui::Timer::after(std::time::Duration::from_millis(1500)).await;
+                if let Some(view) = weak.upgrade() {
+                    view.update(cx, |this, cx| {
+                        this.refresh(cx);
+                    })
+                    .ok();
+                }
+            },
+        )
         .detach();
     }
 
@@ -431,7 +459,11 @@ impl NetConfigView {
             pal,
             110.0,
             label.to_string(),
-            if value.is_empty() { "—".to_string() } else { value.to_string() },
+            if value.is_empty() {
+                "—".to_string()
+            } else {
+                value.to_string()
+            },
         )
     }
 }
@@ -445,30 +477,39 @@ impl Render for NetConfigView {
         let status_msg = self.status.clone();
 
         // 页面根容器 + 页头（右侧权限状态）+ 状态横幅 + 各功能卡
-        page_root(&pal, "net_config-page-root", &self.page_scroll, &cx.entity())
-            // 页头：标题/副标题 + 管理员权限状态徽标
-            .child(
-                page_header(&pal, "网络配置", "适配器配置 · DHCP/静态切换 · MAC").child(status_pill(
-                    &pal,
-                    if admin {
-                        "管理员权限"
-                    } else {
-                        "普通权限（修改需管理员）"
-                    },
-                    if admin { pal.success } else { pal.warning },
-                )),
-            )
-            // 错误/状态消息
-            .when(!status_msg.is_empty(), |s| {
-                let msg = status_msg.clone();
-                s.child(banner(&pal, BannerKind::Info, msg))
-            })
-            // 适配器选择 + 当前配置
-            .child(self.adapter_panel(&pal, cx))
-            // 修改操作
-            .when(selected_adapter.is_some(), |s| s.child(self.action_panel(&pal, cx)))
-            // 步骤结果
-            .when(!steps.is_empty(), |s| s.child(self.steps_panel(&pal, &steps)))
+        page_root(
+            &pal,
+            "net_config-page-root",
+            &self.page_scroll,
+            &cx.entity(),
+        )
+        // 页头：标题/副标题 + 管理员权限状态徽标
+        .child(
+            page_header(&pal, "网络配置", "适配器配置 · DHCP/静态切换 · MAC").child(status_pill(
+                &pal,
+                if admin {
+                    "管理员权限"
+                } else {
+                    "普通权限（修改需管理员）"
+                },
+                if admin { pal.success } else { pal.warning },
+            )),
+        )
+        // 错误/状态消息
+        .when(!status_msg.is_empty(), |s| {
+            let msg = status_msg.clone();
+            s.child(banner(&pal, BannerKind::Info, msg))
+        })
+        // 适配器选择 + 当前配置
+        .child(self.adapter_panel(&pal, cx))
+        // 修改操作
+        .when(selected_adapter.is_some(), |s| {
+            s.child(self.action_panel(&pal, cx))
+        })
+        // 步骤结果
+        .when(!steps.is_empty(), |s| {
+            s.child(self.steps_panel(&pal, &steps))
+        })
     }
 }
 
@@ -487,70 +528,76 @@ impl NetConfigView {
                     .flex_col()
                     .max_h(px(220.0))
                     .overflow_scroll()
-                    .children(
-                        adapters.iter().map(|a| {
-                            let name = a.name.clone();
-                            let name_click = name.clone();
-                            let desc = a.description.clone();
-                            let status = a.status.clone();
-                            let mac = a.mac.clone().unwrap_or_default();
-                            let is_sel = selected.as_deref() == Some(name.as_str());
-                            let has_ips = !a.ipv4.is_empty();
-                            div()
-                                .id(SharedString::from(format!("nc-adapter-{}", name)))
-                                .flex_col()
-                                .gap_0p5()
-                                .px_4()
-                                .py_2()
-                                .cursor_pointer()
-                                .when(is_sel, |s| s.bg(pal.bg_hover))
-                                .border_b_1()
-                                .border_color(pal.border)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.select_adapter(&name_click, cx);
-                                }))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .size(px(6.0))
-                                                .rounded_full()
-                                                .bg(if status == "Up" { pal.success } else { pal.text_muted }),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .text_size(px(13.0))
-                                                .text_color(if is_sel { pal.accent } else { pal.text })
-                                                .child(name),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_size(px(11.0))
-                                                .text_color(if status == "Up" { pal.success } else { pal.text_muted })
-                                                .child(if status == "Up" { "已连接" } else { "已断开" }),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(11.0))
-                                        .text_color(pal.text_muted)
-                                        .child(SharedString::from(desc)),
-                                )
-                                .when(has_ips, |s| {
-                                    let ip = a.ipv4.first().cloned().unwrap_or_default();
-                                    s.child(
+                    .children(adapters.iter().map(|a| {
+                        let name = a.name.clone();
+                        let name_click = name.clone();
+                        let desc = a.description.clone();
+                        let status = a.status.clone();
+                        let mac = a.mac.clone().unwrap_or_default();
+                        let is_sel = selected.as_deref() == Some(name.as_str());
+                        let has_ips = !a.ipv4.is_empty();
+                        div()
+                            .id(SharedString::from(format!("nc-adapter-{}", name)))
+                            .flex_col()
+                            .gap_0p5()
+                            .px_4()
+                            .py_2()
+                            .cursor_pointer()
+                            .when(is_sel, |s| s.bg(pal.bg_hover))
+                            .border_b_1()
+                            .border_color(pal.border)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.select_adapter(&name_click, cx);
+                            }))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(div().size(px(6.0)).rounded_full().bg(
+                                        if status == "Up" {
+                                            pal.success
+                                        } else {
+                                            pal.text_muted
+                                        },
+                                    ))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .text_size(px(13.0))
+                                            .text_color(if is_sel { pal.accent } else { pal.text })
+                                            .child(name),
+                                    )
+                                    .child(
                                         div()
                                             .text_size(px(11.0))
-                                            .text_color(pal.text_muted)
-                                            .child(SharedString::from(format!("IP {} · MAC {}", ip, mac))),
-                                    )
-                                })
-                        }),
-                    ),
+                                            .text_color(if status == "Up" {
+                                                pal.success
+                                            } else {
+                                                pal.text_muted
+                                            })
+                                            .child(if status == "Up" {
+                                                "已连接"
+                                            } else {
+                                                "已断开"
+                                            }),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(pal.text_muted)
+                                    .child(SharedString::from(desc)),
+                            )
+                            .when(has_ips, |s| {
+                                let ip = a.ipv4.first().cloned().unwrap_or_default();
+                                s.child(
+                                    div().text_size(px(11.0)).text_color(pal.text_muted).child(
+                                        SharedString::from(format!("IP {} · MAC {}", ip, mac)),
+                                    ),
+                                )
+                            })
+                    })),
             )
     }
 
@@ -717,12 +764,12 @@ impl NetConfigView {
                                 .child(self.mac_input.clone()),
                         )
                         .when(!mac.is_empty(), |s| {
-                            s.child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(pal.text_muted)
-                                    .child(SharedString::from(format!("当前：{}（修改后网卡将短暂重启）", mac))),
-                            )
+                            s.child(div().text_size(px(11.0)).text_color(pal.text_muted).child(
+                                SharedString::from(format!(
+                                    "当前：{}（修改后网卡将短暂重启）",
+                                    mac
+                                )),
+                            ))
                         })
                         .child(
                             div().flex().justify_end().child(

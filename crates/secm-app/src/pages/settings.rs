@@ -5,8 +5,8 @@
 // （切换/激活计划/异类策略/导入卓越）在后台线程执行，完成后后台重读回填；
 // 主线程仅渲染当前状态。写操作互斥防并发。
 
-use gpui::{div, px, SharedString, Window, Context, Render, WeakEntity};
 use gpui::prelude::*;
+use gpui::{div, px, Context, Render, SharedString, WeakEntity, Window};
 use secm_core::settings::{self, HeteroPolicies, PowerPlan, SettingState};
 
 use crate::pi_clone::theme::{Appearance, Palette};
@@ -134,38 +134,40 @@ impl SettingsView {
         cx.notify();
 
         let weak: WeakEntity<Self> = cx.entity().downgrade();
-        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-            let exec = cx.background_executor().clone();
-            let data = exec
-                .spawn(async move {
-                    AllSettings {
-                        toggles: [
-                            ToggleKind::Hags,
-                            ToggleKind::GameMode,
-                            ToggleKind::GameOptimization,
-                            ToggleKind::Vrr,
-                            ToggleKind::MousePrecision,
-                        ]
-                        .into_iter()
-                        .map(|k| (k, k.get()))
-                        .collect(),
-                        plans: settings::get_power_plans().unwrap_or_default(),
-                        hetero: settings::get_hetero_policies().ok(),
-                    }
-                })
-                .await;
-            if let Some(view) = weak.upgrade() {
-                view.update(cx, |this, cx| {
-                    this.loading = false;
-                    this.toggles = data.toggles;
-                    this.plans = data.plans;
-                    this.hetero = data.hetero;
-                    this.status = SharedString::from("");
-                    cx.notify();
-                })
-                .ok();
-            }
-        })
+        cx.spawn(
+            async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let exec = cx.background_executor().clone();
+                let data = exec
+                    .spawn(async move {
+                        AllSettings {
+                            toggles: [
+                                ToggleKind::Hags,
+                                ToggleKind::GameMode,
+                                ToggleKind::GameOptimization,
+                                ToggleKind::Vrr,
+                                ToggleKind::MousePrecision,
+                            ]
+                            .into_iter()
+                            .map(|k| (k, k.get()))
+                            .collect(),
+                            plans: settings::get_power_plans().unwrap_or_default(),
+                            hetero: settings::get_hetero_policies().ok(),
+                        }
+                    })
+                    .await;
+                if let Some(view) = weak.upgrade() {
+                    view.update(cx, |this, cx| {
+                        this.loading = false;
+                        this.toggles = data.toggles;
+                        this.plans = data.plans;
+                        this.hetero = data.hetero;
+                        this.status = SharedString::from("");
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            },
+        )
         .detach();
     }
 
@@ -183,45 +185,48 @@ impl SettingsView {
 
         let weak: WeakEntity<Self> = cx.entity().downgrade();
         let kind_c = kind;
-        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-            let exec = cx.background_executor().clone();
-            // 后台：读当前真值 → 反相写入
-            let result = exec
-                .spawn(async move {
-                    let cur = kind_c.get();
-                    kind_c.set(!cur.enabled)
-                })
-                .await;
-            // UI 侧日志：记录用户触发的开关切换（成功用 info，失败用 warn）
-            match &result {
-                Ok(s) => log::info!("系统设置 · 已切换「{}」→ {}", kind_c.label(), s.message),
-                Err(e) => log::warn!("系统设置 · 切换「{}」失败: {}", kind_c.label(), e),
-            }
-            if let Some(view) = weak.upgrade() {
-                view.update(cx, |this, cx| {
-                    this.op_busy = false;
-                    match &result {
-                        Ok(s) => this.status = SharedString::from(s.message.clone()),
-                        Err(e) => this.status = SharedString::from(format!("操作失败: {}", e)),
-                    }
-                    cx.notify();
-                })
-                .ok();
-                // 后台重读该开关，回填真实状态（写可能被系统拒绝）
+        cx.spawn(
+            async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
                 let exec = cx.background_executor().clone();
-                let k2 = kind_c;
-                let new_state = exec.spawn(async move { k2.get() }).await;
+                // 后台：读当前真值 → 反相写入
+                let result = exec
+                    .spawn(async move {
+                        let cur = kind_c.get();
+                        kind_c.set(!cur.enabled)
+                    })
+                    .await;
+                // UI 侧日志：记录用户触发的开关切换（成功用 info，失败用 warn）
+                match &result {
+                    Ok(s) => log::info!("系统设置 · 已切换「{}」→ {}", kind_c.label(), s.message),
+                    Err(e) => log::warn!("系统设置 · 切换「{}」失败: {}", kind_c.label(), e),
+                }
                 if let Some(view) = weak.upgrade() {
                     view.update(cx, |this, cx| {
-                        if let Some((_, st)) = this.toggles.iter_mut().find(|(tk, _)| *tk == k2) {
-                            *st = new_state;
+                        this.op_busy = false;
+                        match &result {
+                            Ok(s) => this.status = SharedString::from(s.message.clone()),
+                            Err(e) => this.status = SharedString::from(format!("操作失败: {}", e)),
                         }
                         cx.notify();
                     })
                     .ok();
+                    // 后台重读该开关，回填真实状态（写可能被系统拒绝）
+                    let exec = cx.background_executor().clone();
+                    let k2 = kind_c;
+                    let new_state = exec.spawn(async move { k2.get() }).await;
+                    if let Some(view) = weak.upgrade() {
+                        view.update(cx, |this, cx| {
+                            if let Some((_, st)) = this.toggles.iter_mut().find(|(tk, _)| *tk == k2)
+                            {
+                                *st = new_state;
+                            }
+                            cx.notify();
+                        })
+                        .ok();
+                    }
                 }
-            }
-        })
+            },
+        )
         .detach();
     }
 
@@ -242,52 +247,56 @@ impl SettingsView {
             .find(|p| p.guid == guid)
             .map(|p| p.name.clone())
             .unwrap_or_else(|| format!("计划 {}", &guid[..8.min(guid.len())]));
-        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-            let exec = cx.background_executor().clone();
-            let result = exec
-                .spawn(async move { settings::set_power_plan(&guid_c) })
-                .await;
-            // UI 侧日志：电源计划激活结果
-            match &result {
-                Ok(()) => log::info!("系统设置 · 已激活电源计划 {}", name_c),
-                Err(e) => log::warn!("系统设置 · 激活电源计划 {} 失败: {}", name_c, e),
-            }
-            if let Some(view) = weak.upgrade() {
-                view.update(cx, |this, cx| {
-                    this.op_busy = false;
-                    this.status = match result {
-                        Ok(()) => SharedString::from("电源计划已切换"),
-                        Err(e) => SharedString::from(format!("切换失败: {}", e)),
-                    };
-                    cx.notify();
-                })
-                .ok();
-                view.update(cx, |this, cx| {
-                    // 后台重读计划列表与当前激活
-                    this.start_reload_plans(cx);
-                })
-                .ok();
-            }
-        })
+        cx.spawn(
+            async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let exec = cx.background_executor().clone();
+                let result = exec
+                    .spawn(async move { settings::set_power_plan(&guid_c) })
+                    .await;
+                // UI 侧日志：电源计划激活结果
+                match &result {
+                    Ok(()) => log::info!("系统设置 · 已激活电源计划 {}", name_c),
+                    Err(e) => log::warn!("系统设置 · 激活电源计划 {} 失败: {}", name_c, e),
+                }
+                if let Some(view) = weak.upgrade() {
+                    view.update(cx, |this, cx| {
+                        this.op_busy = false;
+                        this.status = match result {
+                            Ok(()) => SharedString::from("电源计划已切换"),
+                            Err(e) => SharedString::from(format!("切换失败: {}", e)),
+                        };
+                        cx.notify();
+                    })
+                    .ok();
+                    view.update(cx, |this, cx| {
+                        // 后台重读计划列表与当前激活
+                        this.start_reload_plans(cx);
+                    })
+                    .ok();
+                }
+            },
+        )
         .detach();
     }
 
     /// 后台仅重读电源计划列表
     fn start_reload_plans(&mut self, cx: &mut Context<Self>) {
         let weak: WeakEntity<Self> = cx.entity().downgrade();
-        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-            let exec = cx.background_executor().clone();
-            let plans = exec
-                .spawn(async move { settings::get_power_plans().unwrap_or_default() })
-                .await;
-            if let Some(view) = weak.upgrade() {
-                view.update(cx, |this, cx| {
-                    this.plans = plans;
-                    cx.notify();
-                })
-                .ok();
-            }
-        })
+        cx.spawn(
+            async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let exec = cx.background_executor().clone();
+                let plans = exec
+                    .spawn(async move { settings::get_power_plans().unwrap_or_default() })
+                    .await;
+                if let Some(view) = weak.upgrade() {
+                    view.update(cx, |this, cx| {
+                        this.plans = plans;
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            },
+        )
         .detach();
     }
 
@@ -309,41 +318,39 @@ impl SettingsView {
         let kind_c = kind.to_string();
         let kind_label_c = kind_label.to_string();
         let value_c = value;
-        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-            let exec = cx.background_executor().clone();
-            let result = exec
-                .spawn(async move { settings::set_hetero_policy(&kind_c, value_c) })
-                .await;
-            // UI 侧日志：异类调度策略设置结果
-            let value_label = Self::hetero_label(value_c);
-            match &result {
-                Ok(()) => log::info!(
-                    "系统设置 · {}已设为「{}」",
-                    kind_label_c,
-                    value_label
-                ),
-                Err(e) => log::warn!("系统设置 · 设置{}失败: {}", kind_label_c, e),
-            }
-            if let Some(view) = weak.upgrade() {
-                view.update(cx, |this, cx| {
-                    this.op_busy = false;
-                    this.status = match result {
-                        Ok(()) => SharedString::from(format!(
-                            "{}已设为「{}」",
-                            kind_label_c,
-                            Self::hetero_label(value_c)
-                        )),
-                        Err(e) => SharedString::from(format!("设置失败: {}", e)),
-                    };
-                    cx.notify();
-                })
-                .ok();
-                view.update(cx, |this, cx| {
-                    this.start_load(cx);
-                })
-                .ok();
-            }
-        })
+        cx.spawn(
+            async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let exec = cx.background_executor().clone();
+                let result = exec
+                    .spawn(async move { settings::set_hetero_policy(&kind_c, value_c) })
+                    .await;
+                // UI 侧日志：异类调度策略设置结果
+                let value_label = Self::hetero_label(value_c);
+                match &result {
+                    Ok(()) => log::info!("系统设置 · {}已设为「{}」", kind_label_c, value_label),
+                    Err(e) => log::warn!("系统设置 · 设置{}失败: {}", kind_label_c, e),
+                }
+                if let Some(view) = weak.upgrade() {
+                    view.update(cx, |this, cx| {
+                        this.op_busy = false;
+                        this.status = match result {
+                            Ok(()) => SharedString::from(format!(
+                                "{}已设为「{}」",
+                                kind_label_c,
+                                Self::hetero_label(value_c)
+                            )),
+                            Err(e) => SharedString::from(format!("设置失败: {}", e)),
+                        };
+                        cx.notify();
+                    })
+                    .ok();
+                    view.update(cx, |this, cx| {
+                        this.start_load(cx);
+                    })
+                    .ok();
+                }
+            },
+        )
         .detach();
     }
 
@@ -357,37 +364,39 @@ impl SettingsView {
         cx.notify();
 
         let weak: WeakEntity<Self> = cx.entity().downgrade();
-        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-            let exec = cx.background_executor().clone();
-            let result = exec
-                .spawn(async move { settings::enable_ultimate_performance() })
-                .await;
-            // UI 侧日志：导入卓越性能计划结果
-            match &result {
-                Ok(msg) => log::info!("系统设置 · 导入卓越性能计划成功: {}", msg),
-                Err(e) => log::warn!("系统设置 · 导入卓越性能计划失败: {}", e),
-            }
-            if let Some(view) = weak.upgrade() {
-                view.update(cx, |this, cx| {
-                    this.op_busy = false;
-                    match result {
-                        Ok(msg) => {
-                            this.ultimate_msg = SharedString::from(msg);
-                            this.status = SharedString::from("卓越性能电源计划已导入并激活");
+        cx.spawn(
+            async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let exec = cx.background_executor().clone();
+                let result = exec
+                    .spawn(async move { settings::enable_ultimate_performance() })
+                    .await;
+                // UI 侧日志：导入卓越性能计划结果
+                match &result {
+                    Ok(msg) => log::info!("系统设置 · 导入卓越性能计划成功: {}", msg),
+                    Err(e) => log::warn!("系统设置 · 导入卓越性能计划失败: {}", e),
+                }
+                if let Some(view) = weak.upgrade() {
+                    view.update(cx, |this, cx| {
+                        this.op_busy = false;
+                        match result {
+                            Ok(msg) => {
+                                this.ultimate_msg = SharedString::from(msg);
+                                this.status = SharedString::from("卓越性能电源计划已导入并激活");
+                            }
+                            Err(e) => {
+                                this.status = SharedString::from(format!("导入失败: {}", e));
+                            }
                         }
-                        Err(e) => {
-                            this.status = SharedString::from(format!("导入失败: {}", e));
-                        }
-                    }
-                    cx.notify();
-                })
-                .ok();
-                view.update(cx, |this, cx| {
-                    this.start_reload_plans(cx);
-                })
-                .ok();
-            }
-        })
+                        cx.notify();
+                    })
+                    .ok();
+                    view.update(cx, |this, cx| {
+                        this.start_reload_plans(cx);
+                    })
+                    .ok();
+                }
+            },
+        )
         .detach();
     }
 
@@ -438,10 +447,7 @@ impl Render for SettingsView {
                                     .flex_col()
                                     .gap_1()
                                     .child(
-                                        div()
-                                            .text_color(pal.text)
-                                            .text_size(px(14.0))
-                                            .child(label),
+                                        div().text_color(pal.text).text_size(px(14.0)).child(label),
                                     )
                                     .child(
                                         div()
@@ -506,12 +512,7 @@ impl Render for SettingsView {
                                     .items_center()
                                     .gap_2()
                                     .when(active, |s| {
-                                        s.child(
-                                            div()
-                                                .size(px(7.0))
-                                                .rounded_full()
-                                                .bg(pal.success),
-                                        )
+                                        s.child(div().size(px(7.0)).rounded_full().bg(pal.success))
                                     })
                                     .child(
                                         div()
@@ -527,11 +528,7 @@ impl Render for SettingsView {
                             .child(
                                 div()
                                     .text_size(px(11.0))
-                                    .text_color(if active {
-                                        pal.success
-                                    } else {
-                                        pal.text_muted
-                                    })
+                                    .text_color(if active { pal.success } else { pal.text_muted })
                                     .child(if active {
                                         "当前 · 点击其余计划可切换".to_string()
                                     } else {
@@ -620,9 +617,7 @@ fn hetero_section_row(
                         .rounded_md()
                         .cursor_pointer()
                         // 选中档：accent 实底 + 对比色字；未选档：hover 底 + 悬停加深
-                        .when(is_cur, |s| {
-                            s.bg(pal.accent).text_color(pal.accent_contrast)
-                        })
+                        .when(is_cur, |s| s.bg(pal.accent).text_color(pal.accent_contrast))
                         .when(!is_cur, |s| {
                             s.bg(pal.bg_hover)
                                 .hover(|s| s.bg(pal.bg_selected))
@@ -673,9 +668,7 @@ impl SettingsView {
                     .size(px(20.0))
                     .rounded_full()
                     // 开：圆钮右移取对比色；关：圆钮左移取弱化色
-                    .when(enabled, |s| {
-                        s.bg(pal.accent_contrast).right(px(2.0))
-                    })
+                    .when(enabled, |s| s.bg(pal.accent_contrast).right(px(2.0)))
                     .when(!enabled, |s| s.bg(pal.text_muted).left(px(2.0))),
             )
     }

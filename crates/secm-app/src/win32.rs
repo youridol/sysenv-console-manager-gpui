@@ -13,8 +13,8 @@ use windows_sys::Win32::Graphics::Dwm::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, SendMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_STYLE,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_CLOSE,
-    WS_CAPTION, WS_SYSMENU, SW_MINIMIZE,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_MINIMIZE, WM_CLOSE,
+    WS_CAPTION, WS_SYSMENU,
 };
 
 /// 从 gpui Window 取 HWND（与 icons.rs 相同桥接）
@@ -72,9 +72,6 @@ pub fn set_rounded_corners(hwnd: HWND) {
     }
 }
 
-
-
-
 /// 最小化窗口
 pub fn minimize_window(hwnd: HWND) {
     unsafe {
@@ -88,7 +85,3 @@ pub fn close_window(hwnd: HWND) {
         SendMessageW(hwnd, WM_CLOSE, 0, 0);
     }
 }
-
-
-
-

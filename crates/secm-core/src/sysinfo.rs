@@ -366,7 +366,10 @@ fn get_activation() -> ActivationInfo {
             get_activation_by_powershell()
         }
         Err(e) => {
-            log::warn!("sysinfo: 激活状态纯 Rust 驱动失败，回退 PowerShell 查询: {}", e);
+            log::warn!(
+                "sysinfo: 激活状态纯 Rust 驱动失败，回退 PowerShell 查询: {}",
+                e
+            );
             get_activation_by_powershell()
         }
     }
@@ -456,7 +459,10 @@ fn get_latest_patch() -> PatchInfo {
             get_latest_patch_by_powershell()
         }
         Err(e) => {
-            log::warn!("sysinfo: 最新补丁纯 Rust 驱动失败，回退 PowerShell 查询: {}", e);
+            log::warn!(
+                "sysinfo: 最新补丁纯 Rust 驱动失败，回退 PowerShell 查询: {}",
+                e
+            );
             get_latest_patch_by_powershell()
         }
     }

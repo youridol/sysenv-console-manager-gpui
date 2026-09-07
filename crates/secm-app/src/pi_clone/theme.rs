@@ -67,11 +67,11 @@ impl Palette {
     pub fn light() -> Self {
         Self {
             bg: rgba8(0xf7f7f5),
-            bg_panel: rgba8(0xf1f1efeb), // rgba(241,241,239,.92)
-            bg_hover: rgba8(0x1d1d1f0e), // rgba(29,29,31,.055) ≈ 0x0e
+            bg_panel: rgba8(0xf1f1efeb),    // rgba(241,241,239,.92)
+            bg_hover: rgba8(0x1d1d1f0e),    // rgba(29,29,31,.055) ≈ 0x0e
             bg_selected: rgba8(0x1d1d1f14), // rgba(29,29,31,.08) ≈ 0x14
-            border: rgba8(0x3c3c4329),    // rgba(60,60,67,.16) ≈ 0x29
-            separator: rgba8(0x3c3c431f), // rgba(60,60,67,.12) ≈ 0x1f
+            border: rgba8(0x3c3c4329),      // rgba(60,60,67,.16) ≈ 0x29
+            separator: rgba8(0x3c3c431f),   // rgba(60,60,67,.12) ≈ 0x1f
             surface: rgba8(0xffffff),
             surface_muted: rgba8(0xffffffa3), // rgba(255,255,255,.64) ≈ 0xa3
             surface_elevated: rgba8(0xffffff),
@@ -98,11 +98,11 @@ impl Palette {
     pub fn dark() -> Self {
         Self {
             bg: rgba8(0x1c1c1e),
-            bg_panel: rgba8(0x242426f0), // rgba(36,36,38,.94)
-            bg_hover: rgba8(0xffffff13), // rgba(255,255,255,.075) ≈ 0x13
+            bg_panel: rgba8(0x242426f0),    // rgba(36,36,38,.94)
+            bg_hover: rgba8(0xffffff13),    // rgba(255,255,255,.075) ≈ 0x13
             bg_selected: rgba8(0xffffff1f), // rgba(255,255,255,.12) ≈ 0x1f
-            border: rgba8(0xebebf526),    // rgba(235,235,245,.15) ≈ 0x26
-            separator: rgba8(0xebebf51a), // rgba(235,235,245,.10) ≈ 0x1a
+            border: rgba8(0xebebf526),      // rgba(235,235,245,.15) ≈ 0x26
+            separator: rgba8(0xebebf51a),   // rgba(235,235,245,.10) ≈ 0x1a
             surface: rgba8(0x252527),
             surface_muted: rgba8(0x2c2c2eb8), // rgba(44,44,46,.72) ≈ 0xb8
             surface_elevated: rgba8(0x2c2c2e),
@@ -133,6 +133,3 @@ impl Palette {
         }
     }
 }
-
-
-

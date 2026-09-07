@@ -65,24 +65,30 @@ pub fn list_processes() -> Vec<ProcessInfo> {
 /// Valid priorities: idle, below_normal, normal, above_normal, high, realtime
 pub fn set_process_priority(pid: u32, priority: &str) -> CleanupResult {
     const PROCESS_SET_INFORMATION: u32 = 0x0200;
-    let priority_class: u32 = match priority.to_lowercase().as_str() {
-        "idle" => 0x0000_0040,
-        "below_normal" => 0x0000_4000,
-        "normal" => 0x0000_0020,
-        "above_normal" => 0x0000_8000,
-        "high" => 0x0000_0080,
-        "realtime" => 0x0000_0100,
-        other => {
-            return CleanupResult::err(
+    let priority_class: u32 =
+        match priority.to_lowercase().as_str() {
+            "idle" => 0x0000_0040,
+            "below_normal" => 0x0000_4000,
+            "normal" => 0x0000_0020,
+            "above_normal" => 0x0000_8000,
+            "high" => 0x0000_0080,
+            "realtime" => 0x0000_0100,
+            other => return CleanupResult::err(
                 "设置优先级",
-                format!("无效的优先级: {}（可选 idle/below_normal/normal/above_normal/high/realtime）", other),
-            )
-        }
-    };
+                format!(
+                    "无效的优先级: {}（可选 idle/below_normal/normal/above_normal/high/realtime）",
+                    other
+                ),
+            ),
+        };
     #[cfg(windows)]
     {
         extern "system" {
-            fn OpenProcess(dw_desired_access: u32, b_inherit_handle: i32, dw_process_id: u32) -> *mut std::ffi::c_void;
+            fn OpenProcess(
+                dw_desired_access: u32,
+                b_inherit_handle: i32,
+                dw_process_id: u32,
+            ) -> *mut std::ffi::c_void;
             fn SetPriorityClass(process: *mut std::ffi::c_void, priority_class: u32) -> i32;
             fn CloseHandle(h_object: *mut std::ffi::c_void) -> i32;
         }

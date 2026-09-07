@@ -7,7 +7,11 @@ use serde::Serialize;
 pub enum CoreError {
     /// Win32 API 调用失败（含 WMI/COM 封装失败）
     #[error("[{api}] {op} 失败: {detail}")]
-    WinApi { api: &'static str, op: String, detail: String },
+    WinApi {
+        api: &'static str,
+        op: String,
+        detail: String,
+    },
 
     /// 注册表读取失败
     #[error("注册表读取失败: {path} | {detail}")]
@@ -52,19 +56,32 @@ impl CoreError {
         op: impl Into<String>,
         detail: impl Into<String>,
     ) -> Self {
-        Self::WinApi { api, op: op.into(), detail: detail.into() }
+        Self::WinApi {
+            api,
+            op: op.into(),
+            detail: detail.into(),
+        }
     }
 
     pub fn registry(path: impl Into<String>, detail: impl Into<String>) -> Self {
-        Self::Registry { path: path.into(), detail: detail.into() }
+        Self::Registry {
+            path: path.into(),
+            detail: detail.into(),
+        }
     }
 
     pub fn http(url: impl Into<String>, detail: impl Into<String>) -> Self {
-        Self::Http { url: url.into(), detail: detail.into() }
+        Self::Http {
+            url: url.into(),
+            detail: detail.into(),
+        }
     }
 
     pub fn parse(what: impl Into<String>, detail: impl Into<String>) -> Self {
-        Self::Parse { what: what.into(), detail: detail.into() }
+        Self::Parse {
+            what: what.into(),
+            detail: detail.into(),
+        }
     }
 
     pub fn needs_admin(op: impl Into<String>) -> Self {

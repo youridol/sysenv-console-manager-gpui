@@ -4,7 +4,7 @@
 // 呈现层统一接入 crate::ui::page 布局框架，色板取自 pi_clone::theme::Palette（明暗随壳联动）。
 
 use gpui::prelude::*;
-use gpui::{div, px, SharedString, Window, Context, Render};
+use gpui::{div, px, Context, Render, SharedString, Window};
 use secm_core::hardware::{self, DiskListItem, DiskSmartView};
 
 use crate::pi_clone::theme::{Appearance, Palette};
@@ -65,20 +65,22 @@ impl HardwareView {
         cx.notify();
 
         let weak = cx.entity().downgrade();
-        cx.spawn(async move |_this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-            let exec = cx.background_executor().clone();
-            let disks = exec.spawn(async move { hardware::list_disks() }).await;
-            // 全链路行为日志：磁盘枚举返回信息
-            log::info!("硬件检测 · 磁盘枚举完成，共 {} 块物理盘", disks.len());
-            if let Some(view) = weak.upgrade() {
-                view.update(cx, |this, cx| {
-                    this.loading_disks = false;
-                    this.disks = disks;
-                    cx.notify();
-                })
-                .ok();
-            }
-        })
+        cx.spawn(
+            async move |_this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let exec = cx.background_executor().clone();
+                let disks = exec.spawn(async move { hardware::list_disks() }).await;
+                // 全链路行为日志：磁盘枚举返回信息
+                log::info!("硬件检测 · 磁盘枚举完成，共 {} 块物理盘", disks.len());
+                if let Some(view) = weak.upgrade() {
+                    view.update(cx, |this, cx| {
+                        this.loading_disks = false;
+                        this.disks = disks;
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            },
+        )
         .detach();
     }
 
@@ -237,7 +239,13 @@ impl HardwareView {
         let disk = d.clone();
         let expanded = self.smart.contains_key(&d.id);
         let loading = self.loading_smart.as_deref() == Some(d.id.as_str());
-        let arrow = if loading { "…" } else if expanded { "▲ 收起" } else { "▼ 详情" };
+        let arrow = if loading {
+            "…"
+        } else if expanded {
+            "▲ 收起"
+        } else {
+            "▼ 详情"
+        };
 
         // 数据行骨架（列宽规格与表头完全一致：Flex / 80 / 70 / 100 / 140 / 80）
         let row = table_row(pal)
@@ -373,8 +381,16 @@ impl HardwareView {
                     div()
                         .text_size(px(12.0))
                         .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(if summary.healthy { pal.success } else { pal.danger })
-                        .child(if summary.healthy { "✓ 健康" } else { "⚠ 告警" }),
+                        .text_color(if summary.healthy {
+                            pal.success
+                        } else {
+                            pal.danger
+                        })
+                        .child(if summary.healthy {
+                            "✓ 健康"
+                        } else {
+                            "⚠ 告警"
+                        }),
                 )
                 .child(
                     div()
@@ -443,32 +459,24 @@ impl HardwareView {
 
         // 关键字段行（NVMe 或无 attributes 时）
         if d.attributes.is_empty() && !detail_rows.is_empty() {
-            body = body.child(
-                div()
-                    .flex_col()
-                    .gap_0p5()
-                    .children(detail_rows.iter().map(|(k, v)| {
-                        let k = k.clone();
-                        let v = v.clone();
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .w(px(140.0))
-                                    .text_size(px(11.5))
-                                    .text_color(pal.text_muted)
-                                    .child(k),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.5))
-                                    .text_color(pal.text)
-                                    .child(v),
-                            )
-                    })),
-            );
+            body = body.child(div().flex_col().gap_0p5().children(detail_rows.iter().map(
+                |(k, v)| {
+                    let k = k.clone();
+                    let v = v.clone();
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .w(px(140.0))
+                                .text_size(px(11.5))
+                                .text_color(pal.text_muted)
+                                .child(k),
+                        )
+                        .child(div().text_size(px(11.5)).text_color(pal.text).child(v))
+                },
+            )));
         }
 
         body

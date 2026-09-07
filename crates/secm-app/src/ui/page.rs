@@ -7,8 +7,8 @@
 //
 // 所有构件返回 gpui::Div，调用方可继续 .id() / .child() / .on_click() 链式装配。
 
-use gpui::{div, px, Div, ElementId, FontWeight, Rgba, ScrollHandle, SharedString, Stateful};
 use gpui::prelude::*;
+use gpui::{div, px, Div, ElementId, FontWeight, Rgba, ScrollHandle, SharedString, Stateful};
 
 use crate::pi_clone::theme::{Palette, TRANSPARENT};
 
@@ -268,7 +268,12 @@ pub fn button_sm(pal: &Palette, kind: ButtonKind) -> Div {
 
 fn button_base(pal: &Palette, kind: ButtonKind, h: f32, pad_x: f32, font: f32) -> Div {
     let (bg, hover, fg, border) = match kind {
-        ButtonKind::Primary => (pal.accent, pal.accent_hover, pal.accent_contrast, TRANSPARENT),
+        ButtonKind::Primary => (
+            pal.accent,
+            pal.accent_hover,
+            pal.accent_contrast,
+            TRANSPARENT,
+        ),
         ButtonKind::Secondary => (pal.bg_hover, pal.bg_selected, pal.text, pal.border),
         ButtonKind::Ghost => (TRANSPARENT, pal.bg_hover, pal.text_muted, TRANSPARENT),
         ButtonKind::Danger => (

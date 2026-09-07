@@ -56,11 +56,19 @@ pub fn default_right_panel_width(viewport_width: f32) -> f32 {
 
 /// Sidebar 可拖拽的最大宽度（只扣右侧栏已占宽度，避免两栏重叠；
 /// Main 自适应伸缩，无独立保底 —— 拉左栏只压缩 Main，右栏不动）
-pub fn sidebar_max_width(viewport_width: f32, right_panel_open: bool, right_panel_width: f32) -> f32 {
+pub fn sidebar_max_width(
+    viewport_width: f32,
+    right_panel_open: bool,
+    right_panel_width: f32,
+) -> f32 {
     if viewport_width <= MOBILE_MAX_WIDTH {
         return SIDEBAR_MAX_WIDTH;
     }
-    let visible_right = if right_panel_open { right_panel_width } else { 0.0 };
+    let visible_right = if right_panel_open {
+        right_panel_width
+    } else {
+        0.0
+    };
     (SIDEBAR_MAX_WIDTH)
         .min(viewport_width - visible_right - 24.0)
         .max(SIDEBAR_MIN_WIDTH)
@@ -94,9 +102,3 @@ pub fn is_split_panel(viewport_width: f32) -> bool {
 pub fn is_compact_overlay(viewport_width: f32) -> bool {
     viewport_width > MOBILE_MAX_WIDTH && viewport_width < SPLIT_PANEL_MIN_WIDTH
 }
-
-
-
-
-
-

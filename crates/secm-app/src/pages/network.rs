@@ -2,7 +2,7 @@
 // 网站可达性 / TCP 端口 / DNS 解析：阻塞网络 IO 放 BackgroundExecutor，完成后回 UI 更新。
 
 use gpui::prelude::*;
-use gpui::{div, px, SharedString, Window, Context, Render};
+use gpui::{div, px, Context, Render, SharedString, Window};
 use secm_core::network as net;
 
 use crate::pi_clone::theme::{Appearance, Palette};
@@ -157,9 +157,17 @@ impl NetworkView {
                                     if let Some(ip) = v4.first() {
                                         detail.push_str(&format!("（{}）", ip));
                                     }
-                                    DiagRow { name: host, ok: true, detail }
+                                    DiagRow {
+                                        name: host,
+                                        ok: true,
+                                        detail,
+                                    }
                                 }
-                                Err(e) => DiagRow { name: host, ok: false, detail: e },
+                                Err(e) => DiagRow {
+                                    name: host,
+                                    ok: false,
+                                    detail: e,
+                                },
                             }
                         })
                         .collect();
@@ -186,13 +194,8 @@ impl NetworkView {
                     let ok_total = this.site_rows.iter().filter(|r| r.ok).count()
                         + this.port_rows.iter().filter(|r| r.ok).count()
                         + this.dns_rows.iter().filter(|r| r.ok).count();
-                    let all = this.site_rows.len()
-                        + this.port_rows.len()
-                        + this.dns_rows.len();
-                    this.status = format!(
-                        "诊断完成：{} / {} 项通过",
-                        ok_total, all
-                    );
+                    let all = this.site_rows.len() + this.port_rows.len() + this.dns_rows.len();
+                    this.status = format!("诊断完成：{} / {} 项通过", ok_total, all);
                     cx.notify();
                 })
                 .ok();
@@ -221,12 +224,11 @@ impl NetworkView {
                         .flex()
                         .items_center()
                         .gap_2()
-                        .child(
-                            div()
-                                .size(px(6.0))
-                                .rounded_full()
-                                .bg(if r.ok { pal.success } else { pal.danger }),
-                        )
+                        .child(div().size(px(6.0)).rounded_full().bg(if r.ok {
+                            pal.success
+                        } else {
+                            pal.danger
+                        }))
                         .child(
                             div()
                                 .text_size(px(12.0))
@@ -245,7 +247,11 @@ impl Render for NetworkView {
 
         page_root(&pal, "network-page-root", &self.page_scroll, &cx.entity())
             // 页头：左侧标题/副标题，右侧动作区（运行按钮 + 状态文本）
-            .child(page_header(&pal, "网络诊断", "网站可达性 · TCP 端口 · DNS 解析"))
+            .child(page_header(
+                &pal,
+                "网络诊断",
+                "网站可达性 · TCP 端口 · DNS 解析",
+            ))
             .child(
                 div()
                     .flex()
@@ -260,7 +266,11 @@ impl Render for NetworkView {
                             button(&pal, ButtonKind::Primary)
                         }
                         .id("net-run")
-                        .child(if running { "诊断中…" } else { "运行诊断" })
+                        .child(if running {
+                            "诊断中…"
+                        } else {
+                            "运行诊断"
+                        })
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.run_diagnostics(cx);
                         })),

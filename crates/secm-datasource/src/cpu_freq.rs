@@ -177,7 +177,11 @@ fn ntapi_avg_freq_inner() -> (Option<f32>, Option<String>, f32) {
     let count = si.dwNumberOfProcessors;
     if count == 0 {
         log::warn!("[cpu_freq] GetSystemInfo returned 0 logical processors");
-        return (None, Some("GetSystemInfo returned 0 processors".to_string()), 0.0);
+        return (
+            None,
+            Some("GetSystemInfo returned 0 processors".to_string()),
+            0.0,
+        );
     }
     let sz = std::mem::size_of::<ProcessorPowerInfo>() * count as usize;
     let mut buf = vec![0u8; sz];
@@ -197,7 +201,11 @@ fn ntapi_avg_freq_inner() -> (Option<f32>, Option<String>, f32) {
             "[cpu_freq] CallNtPowerInformation failed: status=0x{:08X}, freq falls back to PDH/registry",
             rc as u32
         );
-        return (None, Some(format!("CallNtPowerInformation(0x{:08X})", rc as u32)), 0.0);
+        return (
+            None,
+            Some(format!("CallNtPowerInformation(0x{:08X})", rc as u32)),
+            0.0,
+        );
     }
     // SAFETY: 返回成功后缓冲含 count 个 ProcessorPowerInfo（布局对齐一致）
     let infos: &[ProcessorPowerInfo] = unsafe {
@@ -207,9 +215,17 @@ fn ntapi_avg_freq_inner() -> (Option<f32>, Option<String>, f32) {
     let sum_max: u32 = infos.iter().map(|p| p.max_mhz).sum();
     if sum > 0 {
         // avg_max 为疑似标称判定的基准（与 avg_current 同源同除数）
-        (Some(sum as f32 / count as f32), None, sum_max as f32 / count as f32)
+        (
+            Some(sum as f32 / count as f32),
+            None,
+            sum_max as f32 / count as f32,
+        )
     } else {
-        (None, Some("CallNtPowerInformation returned 0 frequency".to_string()), 0.0)
+        (
+            None,
+            Some("CallNtPowerInformation returned 0 frequency".to_string()),
+            0.0,
+        )
     }
 }
 
@@ -268,7 +284,12 @@ fn read_perf_percent(counter: isize) -> Option<f32> {
     let mut value = MaybeUninit::<PDH_FMT_COUNTERVALUE>::zeroed();
     // SAFETY: value 为对齐正确的输出缓冲；ty 由 API 写入
     let rc = unsafe {
-        PdhGetFormattedCounterValue(counter as PDH_HCOUNTER, PDH_FMT_DOUBLE, &mut ty, value.as_mut_ptr())
+        PdhGetFormattedCounterValue(
+            counter as PDH_HCOUNTER,
+            PDH_FMT_DOUBLE,
+            &mut ty,
+            value.as_mut_ptr(),
+        )
     };
     if rc != PDH_CSTATUS_VALID_DATA && rc != PDH_CSTATUS_NEW_DATA {
         return None;

@@ -15,8 +15,8 @@
 // GPUI 0.2 轮询模式（与旧 LogsView 一致）：500ms 从 LogBuffer 拉全量比对追加，
 // 简单可靠、无跨线程投递复杂度；容量 200 使全量克隆开销可忽略。
 
-use gpui::{div, px, FontWeight, InteractiveElement, ParentElement, Styled, Window};
 use gpui::prelude::*;
+use gpui::{div, px, FontWeight, InteractiveElement, ParentElement, Styled, Window};
 use gpui::{Context, SharedString};
 
 use super::icons::{self, Icon};
@@ -154,7 +154,13 @@ impl PiShell {
     }
 
     /// 级别筛选 pill（点击切换）
-    fn log_filter_pill(&self, pal: &Palette, cx: &mut Context<Self>, label: &str, lvl: &str) -> impl IntoElement {
+    fn log_filter_pill(
+        &self,
+        pal: &Palette,
+        cx: &mut Context<Self>,
+        label: &str,
+        lvl: &str,
+    ) -> impl IntoElement {
         let this = cx.entity();
         // 当前筛选（存于 log_filter_level 字段；空 = 全部）
         let active = (self.log_filter_level.is_empty() && lvl.is_empty())
@@ -171,12 +177,23 @@ impl PiShell {
             .cursor_pointer()
             .text_size(px(10.5))
             .text_color(if active { pal.text } else { pal.text_muted })
-            .bg(if active { pal.bg_selected } else { super::theme::TRANSPARENT })
+            .bg(if active {
+                pal.bg_selected
+            } else {
+                super::theme::TRANSPARENT
+            })
             .hover(|s| s.bg(pal.bg_hover))
             .on_click(move |_ev, _w, cx| {
                 let _ = this.update(cx, |t, cx| {
                     t.log_filter_level = owned_lvl.clone();
-                    log::info!("日志流筛选 → {}", if owned_lvl.is_empty() { "全部" } else { &owned_lvl });
+                    log::info!(
+                        "日志流筛选 → {}",
+                        if owned_lvl.is_empty() {
+                            "全部"
+                        } else {
+                            &owned_lvl
+                        }
+                    );
                     cx.notify();
                 });
             })
@@ -184,7 +201,12 @@ impl PiShell {
     }
 
     /// 日志流主体（滚动行列表；**最新日志在第一条**（倒序渲染）；点击行复制该条日志）
-    fn log_stream(&mut self, pal: &Palette, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn log_stream(
+        &mut self,
+        pal: &Palette,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let level = self.log_filter_level.clone();
         // 倒序：日志行按新→旧排列，最新条目显示在顶部第一条
         let rows: Vec<gpui::AnyElement> = self
@@ -201,12 +223,7 @@ impl PiShell {
                     _ => pal.text_muted,
                 };
                 // 复制内容：整行日志文本
-                let copy_text = format!(
-                    "[{}] {} {}",
-                    e.level,
-                    e.timestamp,
-                    e.message
-                );
+                let copy_text = format!("[{}] {} {}", e.level, e.timestamp, e.message);
                 div()
                     .id(SharedString::from(format!("pi-log-row-{ix}-{}", e.level)))
                     .flex()
@@ -279,89 +296,89 @@ impl PiShell {
             .left_0()
             .right_0();
         wrap.child(
+            div()
+                .id("pi-log-stream")
+                .flex_col()
+                .h_full()
+                .flex_none()
+                .overflow_y_scroll()
+                .scrollbar_width(px(0.0))
+                .pr(px(6.0))
+                .track_scroll(&scroll)
+                // 滚轮滚动后触发重绘，让自绘 thumb 跟随最新 offset
+                .on_scroll_wheel({
+                    let this = cx.entity();
+                    move |_ev: &gpui::ScrollWheelEvent, _w, cx| {
+                        let _ = this.update(cx, |_, cx| cx.notify());
+                    }
+                })
+                .bg(pal.bg)
+                .when(rows.is_empty(), |s| {
+                    s.child(
+                        div()
+                            .flex_col()
+                            .items_center()
+                            .justify_center()
+                            .h_full()
+                            .gap(px(6.0))
+                            .text_size(px(11.5))
+                            .text_color(pal.text_dim)
+                            .child(SharedString::from("暂无日志")),
+                    )
+                })
+                .children(rows),
+        )
+        // 自绘滚动条（track + thumb；thumb 可拖）。仅内容超高可滚时显示，
+        // 避免无可滚内容仍留残条。
+        .when(scrollable, |s| {
+            let pal_ref = *pal;
+            s.child(
                 div()
-                    .id("pi-log-stream")
-                    .flex_col()
-                    .h_full()
-                    .flex_none()
-                    .overflow_y_scroll()
-                    .scrollbar_width(px(0.0))
-                    .pr(px(6.0))
-                    .track_scroll(&scroll)
-                    // 滚轮滚动后触发重绘，让自绘 thumb 跟随最新 offset
-                    .on_scroll_wheel({
-                        let this = cx.entity();
-                        move |_ev: &gpui::ScrollWheelEvent, _w, cx| {
-                            let _ = this.update(cx, |_, cx| cx.notify());
-                        }
-                    })
-                    .bg(pal.bg)
-                    .when(rows.is_empty(), |s| {
-                        s.child(
-                            div()
-                                .flex_col()
-                                .items_center()
-                                .justify_center()
-                                .h_full()
-                                .gap(px(6.0))
-                                .text_size(px(11.5))
-                                .text_color(pal.text_dim)
-                                .child(SharedString::from("暂无日志")),
-                        )
-                    })
-                    .children(rows),
+                    .id("pi-log-scrollbar")
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .bottom_0()
+                    .w(px(10.0))
+                    .child(
+                        div()
+                            .id("pi-log-sb-track")
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .w(px(10.0))
+                            .rounded_full()
+                            .hover(|s| s.bg(pal_ref.bg_hover)),
+                    )
+                    .child(
+                        div()
+                            .id("pi-log-sb-thumb")
+                            .absolute()
+                            .left(px(2.0))
+                            .w(px(6.0))
+                            .top(px(thumb_top))
+                            .h(px(thumb_h))
+                            .rounded_full()
+                            // 常显高对比 thumb（solid 灰），确保可见
+                            .bg(if scrollable {
+                                gpui::rgb(0x6e6e73)
+                            } else {
+                                gpui::rgb(0x2c2c2e)
+                            })
+                            .cursor_pointer()
+                            .on_mouse_down(gpui::MouseButton::Left, {
+                                let this = cx.entity();
+                                move |ev: &gpui::MouseDownEvent, _w, cx| {
+                                    let py: f32 = ev.position.y.into();
+                                    let _ = this.update(cx, |t, cx| {
+                                        t.log_sb_thumb_down(py);
+                                        cx.notify();
+                                    });
+                                }
+                            }),
+                    ),
             )
-            // 自绘滚动条（track + thumb；thumb 可拖）。仅内容超高可滚时显示，
-            // 避免无可滚内容仍留残条。
-            .when(scrollable, |s| {
-                let pal_ref = *pal;
-                s.child(
-                    div()
-                        .id("pi-log-scrollbar")
-                        .absolute()
-                        .top_0()
-                        .right_0()
-                        .bottom_0()
-                        .w(px(10.0))
-                        .child(
-                            div()
-                                .id("pi-log-sb-track")
-                                .absolute()
-                                .top_0()
-                                .bottom_0()
-                                .w(px(10.0))
-                                .rounded_full()
-                                .hover(|s| s.bg(pal_ref.bg_hover)),
-                        )
-                        .child(
-                            div()
-                                .id("pi-log-sb-thumb")
-                                .absolute()
-                                .left(px(2.0))
-                                .w(px(6.0))
-                                .top(px(thumb_top))
-                                .h(px(thumb_h))
-                                .rounded_full()
-                                // 常显高对比 thumb（solid 灰），确保可见
-                                .bg(if scrollable {
-                                    gpui::rgb(0x6e6e73)
-                                } else {
-                                    gpui::rgb(0x2c2c2e)
-                                })
-                                .cursor_pointer()
-                                .on_mouse_down(gpui::MouseButton::Left, {
-                                    let this = cx.entity();
-                                    move |ev: &gpui::MouseDownEvent, _w, cx| {
-                                        let py: f32 = ev.position.y.into();
-                                        let _ = this.update(cx, |t, cx| {
-                                            t.log_sb_thumb_down(py);
-                                            cx.notify();
-                                        });
-                                    }
-                                }),
-                        ),
-                )
-            })
+        })
     }
 }
 

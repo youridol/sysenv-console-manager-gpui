@@ -7,11 +7,11 @@
 //   - 双击 reset 到默认宽度（参考 useResizablePanel 的 resetWidth）
 
 #![allow(dead_code)] // 复刻规格预留 API 面（图标/布局常量/面板方法/主题 token/mock 字段），由组件按需取用
-//
-// GPUI 0.2 无 pointer capture：on_mouse_move 只在指针位于元素上时回调。
-// 为避免拖出命中区丢失跟踪，采用官方 on_drag/on_drag_move 状态机（拖拽一旦开始，
-// move 事件持续投递，直到 MouseUp —— 见 gpui-api-notes §1.3）。本结构体维护拖拽
-// 语义状态，宿主（AppShell）在其 render 中构造 divider 元素。
+                     //
+                     // GPUI 0.2 无 pointer capture：on_mouse_move 只在指针位于元素上时回调。
+                     // 为避免拖出命中区丢失跟踪，采用官方 on_drag/on_drag_move 状态机（拖拽一旦开始，
+                     // move 事件持续投递，直到 MouseUp —— 见 gpui-api-notes §1.3）。本结构体维护拖拽
+                     // 语义状态，宿主（AppShell）在其 render 中构造 divider 元素。
 
 /// 面板生长方向：拖动分隔条后宽度增减的方向
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,6 +148,3 @@ fn save_f32(storage_key: &str, value: f32) {
     store.insert(key(storage_key), value);
     save_store(&store);
 }
-
-
-

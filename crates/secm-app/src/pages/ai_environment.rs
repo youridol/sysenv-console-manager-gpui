@@ -11,10 +11,8 @@
 // 色板取自 pi_clone::theme::Palette（明暗双套），随壳主题联动刷新。
 
 use gpui::prelude::*;
-use gpui::{div, px, SharedString, Window, Context, Render, WeakEntity};
-use secm_core::environment::{
-    self, AiExtension, AiTool, McpServerInfo, NpmEnvironment,
-};
+use gpui::{div, px, Context, Render, SharedString, WeakEntity, Window};
+use secm_core::environment::{self, AiExtension, AiTool, McpServerInfo, NpmEnvironment};
 
 use crate::pi_clone::theme::{Appearance, Palette};
 use crate::ui::page::{
@@ -136,48 +134,58 @@ impl AiEnvironmentView {
         cx.notify();
 
         let weak: WeakEntity<Self> = cx.entity().downgrade();
-        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-            let exec = cx.background_executor().clone();
-            // 阻塞查询全部在后台线程执行
-            let result = exec
-                .spawn(async move {
-                    match kind {
-                        DetectKind::Npm => DetectOutcome::Npm(environment::check_npm_environment()),
-                        DetectKind::Tools => {
-                            DetectOutcome::Tools(environment::check_ai_tools().tools)
+        cx.spawn(
+            async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let exec = cx.background_executor().clone();
+                // 阻塞查询全部在后台线程执行
+                let result = exec
+                    .spawn(async move {
+                        match kind {
+                            DetectKind::Npm => {
+                                DetectOutcome::Npm(environment::check_npm_environment())
+                            }
+                            DetectKind::Tools => {
+                                DetectOutcome::Tools(environment::check_ai_tools().tools)
+                            }
+                            DetectKind::Mcp => DetectOutcome::Mcp(environment::list_mcp_servers()),
+                            DetectKind::Ext => DetectOutcome::Ext(environment::list_extensions()),
                         }
-                        DetectKind::Mcp => DetectOutcome::Mcp(environment::list_mcp_servers()),
-                        DetectKind::Ext => DetectOutcome::Ext(environment::list_extensions()),
-                    }
-                })
-                .await;
+                    })
+                    .await;
 
-            // UI 侧日志：各组检测完成（仅一次，不逐条）
-            match &result {
-                DetectOutcome::Npm(n) => log::info!(
-                    "AI 环境 · npm 检测完成（可用: {}，全局包 {} 个）",
-                    n.available,
-                    n.global_packages
-                ),
-                DetectOutcome::Tools(t) => log::info!("AI 环境 · AI 工具检测完成，共 {} 项", t.len()),
-                DetectOutcome::Mcp(m) => log::info!("AI 环境 · MCP 服务器检测完成，共 {} 项", m.len()),
-                DetectOutcome::Ext(e) => log::info!("AI 环境 · Skills 扩展扫描完成，共 {} 项", e.len()),
-            }
-
-            if let Some(view) = weak.upgrade() {
-                view.update(cx, |this, cx| {
-                    this.mark_loading(kind, false);
-                    match result {
-                        DetectOutcome::Npm(n) => this.npm = Some(n),
-                        DetectOutcome::Tools(t) => this.tools = t,
-                        DetectOutcome::Mcp(m) => this.mcps = m,
-                        DetectOutcome::Ext(e) => this.extensions = e,
+                // UI 侧日志：各组检测完成（仅一次，不逐条）
+                match &result {
+                    DetectOutcome::Npm(n) => log::info!(
+                        "AI 环境 · npm 检测完成（可用: {}，全局包 {} 个）",
+                        n.available,
+                        n.global_packages
+                    ),
+                    DetectOutcome::Tools(t) => {
+                        log::info!("AI 环境 · AI 工具检测完成，共 {} 项", t.len())
                     }
-                    cx.notify();
-                })
-                .ok();
-            }
-        })
+                    DetectOutcome::Mcp(m) => {
+                        log::info!("AI 环境 · MCP 服务器检测完成，共 {} 项", m.len())
+                    }
+                    DetectOutcome::Ext(e) => {
+                        log::info!("AI 环境 · Skills 扩展扫描完成，共 {} 项", e.len())
+                    }
+                }
+
+                if let Some(view) = weak.upgrade() {
+                    view.update(cx, |this, cx| {
+                        this.mark_loading(kind, false);
+                        match result {
+                            DetectOutcome::Npm(n) => this.npm = Some(n),
+                            DetectOutcome::Tools(t) => this.tools = t,
+                            DetectOutcome::Mcp(m) => this.mcps = m,
+                            DetectOutcome::Ext(e) => this.extensions = e,
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            },
+        )
         .detach();
     }
 
@@ -197,43 +205,55 @@ impl AiEnvironmentView {
         cx.notify();
 
         let weak: WeakEntity<Self> = cx.entity().downgrade();
-        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-            let exec = cx.background_executor().clone();
-            let action_worker = action.clone();
-            let result = exec
-                .spawn(async move {
-                    match &action_worker {
-                        ToolAction::Install(p) | ToolAction::Upgrade(p) => {
-                            environment::install_or_upgrade_tool(p)
+        cx.spawn(
+            async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let exec = cx.background_executor().clone();
+                let action_worker = action.clone();
+                let result = exec
+                    .spawn(async move {
+                        match &action_worker {
+                            ToolAction::Install(p) | ToolAction::Upgrade(p) => {
+                                environment::install_or_upgrade_tool(p)
+                            }
+                            ToolAction::Uninstall(p) => environment::uninstall_ai_tool(p),
                         }
-                        ToolAction::Uninstall(p) => environment::uninstall_ai_tool(p),
-                    }
-                })
-                .await;
+                    })
+                    .await;
 
-            // 全链路行为日志：AI 工具操作返回信息
-            match &result {
-                Ok(msg) => log::info!("AI 环境 · {} {} 成功: {}", action.label(), action.package(), msg),
-                Err(e) => log::warn!("AI 环境 · {} {} 失败: {}", action.label(), action.package(), e),
-            }
+                // 全链路行为日志：AI 工具操作返回信息
+                match &result {
+                    Ok(msg) => log::info!(
+                        "AI 环境 · {} {} 成功: {}",
+                        action.label(),
+                        action.package(),
+                        msg
+                    ),
+                    Err(e) => log::warn!(
+                        "AI 环境 · {} {} 失败: {}",
+                        action.label(),
+                        action.package(),
+                        e
+                    ),
+                }
 
-            if let Some(view) = weak.upgrade() {
-                view.update(cx, |this, cx| {
-                    this.action_busy = false;
-                    this.status = match &result {
-                        Ok(msg) => msg.clone(),
-                        Err(e) => format!("{}：{}", action.label(), e),
-                    };
-                    cx.notify();
-                })
-                .ok();
-                // 操作后后台重扫工具列表（不回主线程重跑）
-                view.update(cx, |this, cx| {
-                    this.start_detect(DetectKind::Tools, cx);
-                })
-                .ok();
-            }
-        })
+                if let Some(view) = weak.upgrade() {
+                    view.update(cx, |this, cx| {
+                        this.action_busy = false;
+                        this.status = match &result {
+                            Ok(msg) => msg.clone(),
+                            Err(e) => format!("{}：{}", action.label(), e),
+                        };
+                        cx.notify();
+                    })
+                    .ok();
+                    // 操作后后台重扫工具列表（不回主线程重跑）
+                    view.update(cx, |this, cx| {
+                        this.start_detect(DetectKind::Tools, cx);
+                    })
+                    .ok();
+                }
+            },
+        )
         .detach();
     }
 
@@ -249,40 +269,52 @@ impl AiEnvironmentView {
         cx.notify();
 
         let weak: WeakEntity<Self> = cx.entity().downgrade();
-        cx.spawn(async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-            let exec = cx.background_executor().clone();
-            let action_worker = action.clone();
-            let result = exec
-                .spawn(async move {
-                    match &action_worker {
-                        McpAction::Install(p) => environment::install_mcp_server(p),
-                        McpAction::Uninstall(p) => environment::uninstall_mcp_server(p),
-                    }
-                })
-                .await;
+        cx.spawn(
+            async move |_this: WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let exec = cx.background_executor().clone();
+                let action_worker = action.clone();
+                let result = exec
+                    .spawn(async move {
+                        match &action_worker {
+                            McpAction::Install(p) => environment::install_mcp_server(p),
+                            McpAction::Uninstall(p) => environment::uninstall_mcp_server(p),
+                        }
+                    })
+                    .await;
 
-            // 全链路行为日志：MCP 操作返回信息
-            match &result {
-                Ok(msg) => log::info!("AI 环境 · {} {} 成功: {}", action.label(), action.package(), msg),
-                Err(e) => log::warn!("AI 环境 · {} {} 失败: {}", action.label(), action.package(), e),
-            }
+                // 全链路行为日志：MCP 操作返回信息
+                match &result {
+                    Ok(msg) => log::info!(
+                        "AI 环境 · {} {} 成功: {}",
+                        action.label(),
+                        action.package(),
+                        msg
+                    ),
+                    Err(e) => log::warn!(
+                        "AI 环境 · {} {} 失败: {}",
+                        action.label(),
+                        action.package(),
+                        e
+                    ),
+                }
 
-            if let Some(view) = weak.upgrade() {
-                view.update(cx, |this, cx| {
-                    this.action_busy = false;
-                    this.status = match &result {
-                        Ok(msg) => msg.clone(),
-                        Err(e) => format!("{}：{}", action.label(), e),
-                    };
-                    cx.notify();
-                })
-                .ok();
-                view.update(cx, |this, cx| {
-                    this.start_detect(DetectKind::Mcp, cx);
-                })
-                .ok();
-            }
-        })
+                if let Some(view) = weak.upgrade() {
+                    view.update(cx, |this, cx| {
+                        this.action_busy = false;
+                        this.status = match &result {
+                            Ok(msg) => msg.clone(),
+                            Err(e) => format!("{}：{}", action.label(), e),
+                        };
+                        cx.notify();
+                    })
+                    .ok();
+                    view.update(cx, |this, cx| {
+                        this.start_detect(DetectKind::Mcp, cx);
+                    })
+                    .ok();
+                }
+            },
+        )
         .detach();
     }
 }
@@ -348,48 +380,58 @@ impl Render for AiEnvironmentView {
         let action_busy = self.action_busy;
 
         // 统一页面骨架：根容器（内边距/纵向节奏/内容超高时整页纵向滚动）
-        page_root(&pal, "ai_environment-page-root", &self.page_scroll, &cx.entity())
-            // 页头：标题 + 副标题，右侧「全部刷新」
+        page_root(
+            &pal,
+            "ai_environment-page-root",
+            &self.page_scroll,
+            &cx.entity(),
+        )
+        // 页头：标题 + 副标题，右侧「全部刷新」
+        .child(
+            page_header(
+                &pal,
+                "AI 环境",
+                "npm 环境 · AI 工具 · MCP 服务器 · Skills 扩展",
+            )
             .child(
-                page_header(&pal, "AI 环境", "npm 环境 · AI 工具 · MCP 服务器 · Skills 扩展").child(
-                    button(&pal, ButtonKind::Secondary)
-                        .id("ai-rescan")
-                        .child("全部刷新")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.start_detect(DetectKind::Npm, cx);
-                            this.start_detect(DetectKind::Tools, cx);
-                            this.start_detect(DetectKind::Mcp, cx);
-                            this.start_detect(DetectKind::Ext, cx);
-                        })),
+                button(&pal, ButtonKind::Secondary)
+                    .id("ai-rescan")
+                    .child("全部刷新")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.start_detect(DetectKind::Npm, cx);
+                        this.start_detect(DetectKind::Tools, cx);
+                        this.start_detect(DetectKind::Mcp, cx);
+                        this.start_detect(DetectKind::Ext, cx);
+                    })),
+            ),
+        )
+        // 状态消息
+        .when(!status.is_empty(), |s| {
+            let msg = status.clone();
+            s.child(banner(&pal, BannerKind::Info, msg))
+        })
+        // npm 环境卡
+        .child(self.npm_card(&pal, &npm, cx))
+        // AI 工具卡
+        .child(self.tools_card(&pal, &tools, action_busy, cx))
+        // MCP 卡 + 扩展卡双列（flex 等宽两列；禁 grid —— taffy grid 滚动容器内不渲染）
+        .child(
+            div()
+                .flex()
+                .gap_4()
+                .child(div().flex_1().min_w(px(0.0)).child(self.mcp_card(
+                    &pal,
+                    &mcps,
+                    action_busy,
+                    cx,
+                )))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .child(self.ext_card(&pal, &extensions, cx)),
                 ),
-            )
-            // 状态消息
-            .when(!status.is_empty(), |s| {
-                let msg = status.clone();
-                s.child(banner(&pal, BannerKind::Info, msg))
-            })
-            // npm 环境卡
-            .child(self.npm_card(&pal, &npm, cx))
-            // AI 工具卡
-            .child(self.tools_card(&pal, &tools, action_busy, cx))
-            // MCP 卡 + 扩展卡双列（flex 等宽两列；禁 grid —— taffy grid 滚动容器内不渲染）
-            .child(
-                div()
-                    .flex()
-                    .gap_4()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .child(self.mcp_card(&pal, &mcps, action_busy, cx)),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .child(self.ext_card(&pal, &extensions, cx)),
-                    ),
-            )
+        )
     }
 }
 
@@ -507,12 +549,11 @@ impl AiEnvironmentView {
                     .py_2()
                     .border_b_1()
                     .border_color(pal.border)
-                    .child(
-                        div()
-                            .size(px(6.0))
-                            .rounded_full()
-                            .bg(if installed { pal.success } else { pal.text_muted }),
-                    )
+                    .child(div().size(px(6.0)).rounded_full().bg(if installed {
+                        pal.success
+                    } else {
+                        pal.text_muted
+                    }))
                     .child(
                         div()
                             .w(px(110.0))
@@ -526,7 +567,11 @@ impl AiEnvironmentView {
                             .flex_1()
                             .text_size(px(11.5))
                             .text_color(pal.text_muted)
-                            .child(if installed { version } else { "未安装".to_string() }),
+                            .child(if installed {
+                                version
+                            } else {
+                                "未安装".to_string()
+                            }),
                     )
                     .when(installed && upgradable, |r| {
                         r.child(
@@ -534,44 +579,48 @@ impl AiEnvironmentView {
                                 .id("upgrade-tool")
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if !disabled {
-                                        this.run_tool_action(ToolAction::Upgrade(pkg_upgrade.clone()), cx);
+                                        this.run_tool_action(
+                                            ToolAction::Upgrade(pkg_upgrade.clone()),
+                                            cx,
+                                        );
                                     }
                                 }))
                                 .child("升级"),
                         )
                     })
                     .child(
-                        div()
-                            .flex()
-                            .gap_1()
-                            .child(
-                                // 已装=卸载（Danger）/ 未装=安装（Primary），按钮随状态切换语义
-                                button_sm(
-                                    pal,
+                        div().flex().gap_1().child(
+                            // 已装=卸载（Danger）/ 未装=安装（Primary），按钮随状态切换语义
+                            button_sm(
+                                pal,
+                                if installed {
+                                    ButtonKind::Danger
+                                } else {
+                                    ButtonKind::Primary
+                                },
+                            )
+                            .id("install-tool")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if !disabled {
                                     if installed {
-                                        ButtonKind::Danger
+                                        this.run_tool_action(
+                                            ToolAction::Uninstall(pkg_uninstall.clone()),
+                                            cx,
+                                        );
                                     } else {
-                                        ButtonKind::Primary
-                                    },
-                                )
-                                .id("install-tool")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if !disabled {
-                                        if installed {
-                                            this.run_tool_action(
-                                                ToolAction::Uninstall(pkg_uninstall.clone()),
-                                                cx,
-                                            );
-                                        } else {
-                                            this.run_tool_action(
-                                                ToolAction::Install(pkg_install.clone()),
-                                                cx,
-                                            );
-                                        }
+                                        this.run_tool_action(
+                                            ToolAction::Install(pkg_install.clone()),
+                                            cx,
+                                        );
                                     }
-                                }))
-                                .child(if installed { "卸载" } else { "安装" }),
-                            ),
+                                }
+                            }))
+                            .child(if installed {
+                                "卸载"
+                            } else {
+                                "安装"
+                            }),
+                        ),
                     )
             }))
     }
@@ -610,12 +659,11 @@ impl AiEnvironmentView {
                     .py_1p5()
                     .border_b_1()
                     .border_color(pal.border)
-                    .child(
-                        div()
-                            .size(px(6.0))
-                            .rounded_full()
-                            .bg(if installed { pal.success } else { pal.text_muted }),
-                    )
+                    .child(div().size(px(6.0)).rounded_full().bg(if installed {
+                        pal.success
+                    } else {
+                        pal.text_muted
+                    }))
                     .child(
                         div()
                             .flex_1()
@@ -635,7 +683,10 @@ impl AiEnvironmentView {
                                 .id("uninstall-mcp")
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if !disabled {
-                                        this.run_mcp_action(McpAction::Uninstall(pkg_uninstall.clone()), cx);
+                                        this.run_mcp_action(
+                                            McpAction::Uninstall(pkg_uninstall.clone()),
+                                            cx,
+                                        );
                                     }
                                 }))
                                 .child("卸载"),
@@ -647,7 +698,10 @@ impl AiEnvironmentView {
                                 .id("install-mcp")
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if !disabled {
-                                        this.run_mcp_action(McpAction::Install(pkg_install.clone()), cx);
+                                        this.run_mcp_action(
+                                            McpAction::Install(pkg_install.clone()),
+                                            cx,
+                                        );
                                     }
                                 }))
                                 .child("安装"),
@@ -704,12 +758,7 @@ impl AiEnvironmentView {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .text_color(pal.text)
-                                    .child(name),
-                            )
+                            .child(div().text_size(px(12.0)).text_color(pal.text).child(name))
                             .child(
                                 div()
                                     .text_size(px(10.5))

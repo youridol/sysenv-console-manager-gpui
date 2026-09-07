@@ -104,4 +104,5 @@ impl NavGroup {
     }
 }
 
-pub const NAV_GROUPS: &'static [NavGroup] = &[NavGroup::Overview, NavGroup::Tools, NavGroup::System];
+pub const NAV_GROUPS: &'static [NavGroup] =
+    &[NavGroup::Overview, NavGroup::Tools, NavGroup::System];

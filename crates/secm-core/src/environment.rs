@@ -152,7 +152,8 @@ fn read_dx_version() -> (u32, u32) {
             if let Ok(ver_str) = key.get_value::<String, _>("Version") {
                 let parts: Vec<&str> = ver_str.split('.').collect();
                 if parts.len() >= 2 {
-                    if let (Ok(major), Ok(minor)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>())
+                    if let (Ok(major), Ok(minor)) =
+                        (parts[0].parse::<u32>(), parts[1].parse::<u32>())
                     {
                         if major >= 9 {
                             return (major, minor);
@@ -773,7 +774,11 @@ pub fn install_or_upgrade_tool(npm_pkg: &str) -> Result<String, String> {
     // 注：包名已经白名单 + 格式双重校验，拼接安全
     let cmdline = format!("npm install -g {}", npm_pkg);
     // 安装属长任务：5 分钟上限（npm 拉包慢），超时杀树不再永久悬挂（P1-10）
-    let output = run_command_silent_to("cmd", &["/c", &cmdline], std::time::Duration::from_secs(300));
+    let output = run_command_silent_to(
+        "cmd",
+        &["/c", &cmdline],
+        std::time::Duration::from_secs(300),
+    );
 
     match output {
         Some(out) if out.status.success() => {
@@ -914,7 +919,11 @@ pub fn uninstall_ai_tool(npm_pkg: &str) -> Result<String, String> {
     }
     let cmdline = format!("npm uninstall -g {}", npm_pkg);
     // 卸载属长任务：2 分钟上限（P1-10）
-    let output = run_command_silent_to("cmd", &["/c", &cmdline], std::time::Duration::from_secs(120));
+    let output = run_command_silent_to(
+        "cmd",
+        &["/c", &cmdline],
+        std::time::Duration::from_secs(120),
+    );
     match output {
         Some(out) if out.status.success() => {
             let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -1007,7 +1016,11 @@ pub fn install_mcp_server(pkg: &str) -> Result<String, String> {
     }
     let cmdline = format!("npm install -g {}", pkg);
     // MCP 安装属长任务：5 分钟上限（P1-10）
-    let output = run_command_silent_to("cmd", &["/c", &cmdline], std::time::Duration::from_secs(300));
+    let output = run_command_silent_to(
+        "cmd",
+        &["/c", &cmdline],
+        std::time::Duration::from_secs(300),
+    );
     match output {
         Some(out) if out.status.success() => {
             let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -1042,11 +1055,13 @@ pub fn uninstall_mcp_server(pkg: &str) -> Result<String, String> {
     }
     let cmdline = format!("npm uninstall -g {}", pkg);
     // MCP 卸载属长任务：2 分钟上限（P1-10）
-    let output = run_command_silent_to("cmd", &["/c", &cmdline], std::time::Duration::from_secs(120));
+    let output = run_command_silent_to(
+        "cmd",
+        &["/c", &cmdline],
+        std::time::Duration::from_secs(120),
+    );
     match output {
-        Some(out) if out.status.success() => {
-            Ok(format!("{} 卸载成功", pkg))
-        }
+        Some(out) if out.status.success() => Ok(format!("{} 卸载成功", pkg)),
         Some(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             Err(if stderr.is_empty() {
@@ -1121,7 +1136,13 @@ pub fn list_extensions() -> Vec<AiExtension> {
 
 /// 读取扩展目录描述（SKILL.md / README.md 首行）
 fn read_extension_description(dir: &std::path::Path) -> String {
-    for fname in ["SKILL.md", "README.md", "skill.md", "readme.md", "description.md"] {
+    for fname in [
+        "SKILL.md",
+        "README.md",
+        "skill.md",
+        "readme.md",
+        "description.md",
+    ] {
         let f = dir.join(fname);
         if let Ok(content) = std::fs::read_to_string(&f) {
             for line in content.lines() {
@@ -1229,8 +1250,8 @@ fn try_get_version(cmd: &str, npm_pkg: &str) -> String {
 
     // 解析绝对路径：.exe 走直连，.cmd/.bat 走 cmd 中转
     let exe_path = find_executable(cmd);
-    let is_batch = exe_path.to_lowercase().ends_with(".cmd")
-        || exe_path.to_lowercase().ends_with(".bat");
+    let is_batch =
+        exe_path.to_lowercase().ends_with(".cmd") || exe_path.to_lowercase().ends_with(".bat");
     let direct_exe = if exe_path.is_empty() || is_batch {
         None
     } else {
@@ -1470,20 +1491,32 @@ mod tests {
     fn test_infer_arch() {
         // 显式架构标记优先于注册表视图默认值
         assert_eq!(
-            infer_arch("Microsoft Visual C++ 2015-2022 Redistributable (x64)", "x64"),
+            infer_arch(
+                "Microsoft Visual C++ 2015-2022 Redistributable (x64)",
+                "x64"
+            ),
             "x64"
         );
         assert_eq!(
-            infer_arch("Microsoft Visual C++ 2015-2022 Redistributable (x86)", "x64"),
+            infer_arch(
+                "Microsoft Visual C++ 2015-2022 Redistributable (x86)",
+                "x64"
+            ),
             "x86"
         );
         assert_eq!(
-            infer_arch("Microsoft Visual C++ 2015-2022 Redistributable (X64)", "x86"),
+            infer_arch(
+                "Microsoft Visual C++ 2015-2022 Redistributable (X64)",
+                "x86"
+            ),
             "x64"
         );
         // 64-bit / 32-bit 变体
         assert_eq!(
-            infer_arch("Microsoft Visual C++ 2013 Redistributable (x64) - 12.0", "x86"),
+            infer_arch(
+                "Microsoft Visual C++ 2013 Redistributable (x64) - 12.0",
+                "x86"
+            ),
             "x64"
         );
         // 无标记时回退注册表视图默认架构
@@ -1546,7 +1579,9 @@ mod tests {
         // 白名单：AI_TOOLS 声明的包名放行，其他一律拒绝（即使格式合法）
         assert!(is_whitelisted_npm_package("@anthropic-ai/claude-code"));
         assert!(is_whitelisted_npm_package("@openai/codex"));
-        assert!(is_whitelisted_npm_package("@earendil-works/pi-coding-agent"));
+        assert!(is_whitelisted_npm_package(
+            "@earendil-works/pi-coding-agent"
+        ));
         assert!(is_whitelisted_npm_package("@deepseek-ai/dsh"));
         // OpenCode CLI 包（修正：旧配置 @opencode-ai/sdk 是 SDK 库）
         assert!(is_whitelisted_npm_package("opencode-ai"));
