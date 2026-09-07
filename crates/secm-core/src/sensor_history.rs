@@ -9,8 +9,8 @@
 //   经 record_adapter_rates 写入单网卡序列（仅内存态，不持久化）；总量序列以本模块
 //   1s 节拍为准（避免双写）。
 //
-// 速率语义：网络速率来自 GetIfTable2 累计字节差分（if_bytes_map，两次快照
-// Δbytes/Δt），无 PDH ≥1s 间隔限制；首次采样仅建立基线（记 0）。
+// 速率语义（ADR-0006 去重）：网络速率来自统一快照（SensorService 的 GetIfTable2
+// 差分，唯一采集点），本模块求和为总量序列；不再独立触达 GetIfTable2。
 //
 // 线程模型：专职 std::thread 采样（与 SensorService 同款模式）；
 // parking_lot::Mutex 保护状态；GetIfTable2 为微秒级同步调用，不阻塞 UI（S8）。
@@ -59,8 +59,6 @@ struct HistoryState {
     /// 单网卡序列（仅内存态；UI 可调间隔采样写入）
     adapter_rx: HashMap<String, Vec<HistoryPoint>>,
     adapter_tx: HashMap<String, Vec<HistoryPoint>>,
-    /// 上次累计字节快照：(unix_ms, 别名 → (InOctets, OutOctets))
-    prev_bytes: Option<(u64, HashMap<String, (u64, u64)>)>,
     dirty: bool,
 }
 
@@ -138,48 +136,46 @@ pub fn start_once() {
         .expect("spawn secm-sensor-history");
 }
 
-/// 单拍采样：传感器快照 → CPU/GPU/内存序列；累计字节差分 → 总量速率序列
+/// 单拍采样：传感器快照 → CPU/GPU/内存/网络序列
+/// （网络总量速率 = 统一快照 per-NIC 速率求和——GetIfTable2 差分由 SensorService
+/// 唯一执行，ADR-0006 去重采集；service 首拍基线未建时速率 0，语义等同建基线。）
 fn sample_once() {
     let t = now_ms();
     let snap = crate::sensor_service::SensorService::snapshot();
 
-    // 网络总量速率（差分基线在状态内维护）
-    let map = secm_datasource::netif::if_bytes_map();
-    let (rx_kbps, tx_kbps) = {
-        let mut g = state().lock();
-        let (drx, dtx) = match g.prev_bytes {
-            Some((pt, ref prev)) if t > pt => {
-                let dt = (t - pt) as f32 / 1000.0;
-                let mut acc = (0.0f32, 0.0f32);
-                for (name, (rx, tx)) in &map {
-                    if let Some((prx, ptx)) = prev.get(name) {
-                        if rx >= prx {
-                            acc.0 += (rx - prx) as f32 / dt / 1024.0;
-                        }
-                        if tx >= ptx {
-                            acc.1 += (tx - ptx) as f32 / dt / 1024.0;
-                        }
-                    }
-                }
-                acc
-            }
-            _ => (0.0, 0.0), // 首拍仅建立基线
-        };
-        g.prev_bytes = Some((t, map));
-        (drx, dtx)
-    };
+    // 网络总量速率（快照 per-NIC 求和；不重复触达 GetIfTable2）
+    let (rx_kbps, tx_kbps) = snap.net.interfaces.iter().fold((0.0f32, 0.0f32), |acc, i| {
+        (
+            acc.0 + i.rx_kbps.value_or(0.0),
+            acc.1 + i.tx_kbps.value_or(0.0),
+        )
+    });
 
     let mut g = state().lock();
     // 传感器未就绪（服务未起/首拍全零）时不记点，避免污染历史
     if snap.cpu.core_count > 0 {
-        push(&mut g.cpu, HistoryPoint { t, v: snap.cpu.usage }, MAX_POINTS);
+        push(
+            &mut g.cpu,
+            HistoryPoint {
+                t,
+                v: snap.cpu.usage,
+            },
+            MAX_POINTS,
+        );
         if !snap.gpu.is_empty() {
-            let gpu_v = snap.gpu.first().map(|gp| gp.usage).unwrap_or(0.0);
+            let gpu_v = snap
+                .gpu
+                .first()
+                .and_then(|gp| gp.usage.value)
+                .unwrap_or(0.0);
             push(&mut g.gpu, HistoryPoint { t, v: gpu_v }, MAX_POINTS);
         }
         push(
             &mut g.mem,
-            HistoryPoint { t, v: snap.memory.usage_percent },
+            HistoryPoint {
+                t,
+                v: snap.memory.usage_percent,
+            },
             MAX_POINTS,
         );
     }
@@ -260,9 +256,8 @@ fn cache_path() -> Option<std::path::PathBuf> {
 fn save_to_disk() {
     let payload = {
         let g = state().lock();
-        let conv = |s: &Vec<HistoryPoint>| -> Vec<(u64, f32)> {
-            s.iter().map(|p| (p.t, p.v)).collect()
-        };
+        let conv =
+            |s: &Vec<HistoryPoint>| -> Vec<(u64, f32)> { s.iter().map(|p| (p.t, p.v)).collect() };
         Persisted {
             v: 1,
             cpu: conv(&g.cpu),
@@ -279,7 +274,10 @@ fn save_to_disk() {
         Ok(json) => {
             // 临时文件 + 原子替换，避免写一半被结束进程截断
             let tmp = path.with_extension("json.tmp");
-            if std::fs::write(&tmp, json).and_then(|_| std::fs::rename(&tmp, &path)).is_ok() {
+            if std::fs::write(&tmp, json)
+                .and_then(|_| std::fs::rename(&tmp, &path))
+                .is_ok()
+            {
                 state().lock().dirty = false;
             } else {
                 log::warn!("传感器历史 · 持久化写入失败（趋势图跨重启恢复降级）");
@@ -334,7 +332,10 @@ mod tests {
     fn test_window_filter_keeps_recent_points() {
         let now = 10_000u64;
         let series: Vec<HistoryPoint> = (0..10)
-            .map(|i| HistoryPoint { t: i * 1000, v: i as f32 })
+            .map(|i| HistoryPoint {
+                t: i * 1000,
+                v: i as f32,
+            })
             .collect();
         // 60s 窗口应包含全部 10 点（跨度 9s；cutoff 饱和不回绕）
         let start = series.partition_point(|p| p.t < now.saturating_sub(60_000));

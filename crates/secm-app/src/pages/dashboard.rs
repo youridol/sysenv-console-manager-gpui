@@ -12,8 +12,8 @@
 //   差分，无 PDH ≥1s 限制）、活跃 TCP 连接数、链路协商速度；
 // - 磁盘存储卡：型号/容量/用量条 + SMART 健康状态（正常绿/风险关注黄/告警红 + 温度）。
 
-use gpui::{div, px, Div, SharedString, Window, Context, Render, Timer, Rgba};
 use gpui::prelude::*;
+use gpui::{div, px, Context, Div, Render, Rgba, SharedString, Timer, Window};
 use secm_core::hardware::{self, DiskListItem, DiskSmartView};
 use secm_core::sensor::SensorSnapshot;
 use secm_core::sensor_history::{self, HistoryPoint, CHART_WINDOW_MS};
@@ -61,8 +61,6 @@ pub struct DashboardView {
     tcp_estab: u32,
     /// 接口别名 → 链路协商速度
     link_speeds: HashMap<String, String>,
-    /// 视图侧累计字节快照（速率差分基线）：(unix_ms, 别名 → (In, Out))
-    net_prev: Option<(u64, HashMap<String, (u64, u64)>)>,
     // ---- 磁盘存储 + SMART ----
     disks: Vec<DiskListItem>,
     disks_loading: bool,
@@ -97,7 +95,6 @@ impl DashboardView {
             net_total: (0.0, 0.0),
             tcp_estab: 0,
             link_speeds: HashMap::new(),
-            net_prev: None,
             disks: Vec::new(),
             disks_loading: false,
             smart: HashMap::new(),
@@ -127,64 +124,100 @@ impl DashboardView {
 
     /// 1s 传感器轮询（P1-12 门控）+ 趋势历史窗口拉取（同拍一次 notify）
     fn schedule_refresh(&mut self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-            loop {
-                Timer::after(Duration::from_millis(1000)).await;
-                // 不可见时仅睡眠轮询，不取快照不 notify（P1-12）
-                let is_active = this
-                    .update(cx, |v, _| v.active.load(Ordering::Relaxed))
-                    .unwrap_or(false);
-                if !is_active {
-                    continue;
+        cx.spawn(
+            async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                loop {
+                    Timer::after(Duration::from_millis(1000)).await;
+                    // 不可见时仅睡眠轮询，不取快照不 notify（P1-12）
+                    let is_active = this
+                        .update(cx, |v, _| v.active.load(Ordering::Relaxed))
+                        .unwrap_or(false);
+                    if !is_active {
+                        continue;
+                    }
+                    let snap = SensorService::snapshot();
+                    let hist = sensor_history::snapshot_series_window(CHART_WINDOW_MS);
+                    let _ = this.update(cx, |view, cx| {
+                        view.snap = snap;
+                        view.hist_cpu = hist.cpu;
+                        view.hist_gpu = hist.gpu;
+                        view.hist_mem = hist.mem;
+                        view.hist_rx = hist.rx;
+                        view.hist_tx = hist.tx;
+                        cx.notify();
+                    });
                 }
-                let snap = SensorService::snapshot();
-                let hist = sensor_history::snapshot_series_window(CHART_WINDOW_MS);
-                let _ = this.update(cx, |view, cx| {
-                    view.snap = snap;
-                    view.hist_cpu = hist.cpu;
-                    view.hist_gpu = hist.gpu;
-                    view.hist_mem = hist.mem;
-                    view.hist_rx = hist.rx;
-                    view.hist_tx = hist.tx;
-                    cx.notify();
-                });
-            }
-        })
+            },
+        )
         .detach();
     }
 
-    /// 网络采样任务：间隔可调（0.5–5s，每拍重读生效）；后台累计字节差分 +
-    /// TCP 连接数 + 协商速度；单网卡序列回填 sensor_history（内存态）。
+    /// 网络采样任务：间隔可调（0.5–5s，每拍重读生效）。
+    /// 数据源 = SensorService 统一快照（ADR-0005：UI 不触达底层采集 API；
+    /// GetIfTable2 差分由采集服务唯一执行，本任务纯消费快照数值）。
+    /// 快照粒度 1s：0.5s 档位仅在快照更新时记录新点（updated_at_ms 去重）。
     fn start_net_sampler(&mut self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-            loop {
-                // 每拍重读间隔（档位切换下一拍生效，无需重启任务）
-                let interval_ms = match this.update(cx, |v, _| (v.net_interval * 1000.0) as u64) {
-                    Ok(ms) => ms.max(200),
-                    Err(_) => return, // 视图已释放
-                };
-                Timer::after(Duration::from_millis(interval_ms)).await;
-                let exec = cx.background_executor().clone();
-                let sample = exec.spawn(async move { sample_net_once() }).await;
-                let ok = this.update(cx, |v, cx| {
-                    let (rates, total) = diff_rates(v.net_prev.as_ref(), &sample.map, sample.t);
-                    v.net_prev = Some((sample.t, sample.map.clone()));
-                    v.net_rates = rates.clone();
-                    v.net_total = total;
-                    v.tcp_estab = sample.tcp;
-                    v.link_speeds = sample.speeds;
-                    let refs: Vec<(String, f32, f32)> = rates
-                        .iter()
-                        .map(|(n, r, t)| (n.clone(), *r, *t))
-                        .collect();
-                    sensor_history::record_adapter_rates(&refs);
-                    cx.notify();
-                });
-                if ok.is_err() {
-                    return;
+        cx.spawn(
+            async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let mut last_snap_ms: u64 = 0;
+                loop {
+                    // 每拍重读间隔（档位切换下一拍生效，无需重启任务）
+                    let interval_ms = match this.update(cx, |v, _| (v.net_interval * 1000.0) as u64)
+                    {
+                        Ok(ms) => ms.max(200),
+                        Err(_) => return, // 视图已释放
+                    };
+                    Timer::after(Duration::from_millis(interval_ms)).await;
+                    let ok = this.update(cx, |v, cx| {
+                        let snap = SensorService::snapshot();
+                        // 快照网络域时间戳（per-NIC 速率采集时刻）
+                        let snap_ms = snap
+                            .net
+                            .interfaces
+                            .first()
+                            .map(|i| i.rx_kbps.updated_at_ms)
+                            .unwrap_or(0);
+                        if snap_ms != 0 && snap_ms == last_snap_ms {
+                            return; // 快照未更新（0.5s 档位内），跳过重复记录
+                        }
+                        last_snap_ms = snap_ms;
+
+                        let rates: Vec<(String, f32, f32)> = snap
+                            .net
+                            .interfaces
+                            .iter()
+                            .map(|i| {
+                                (
+                                    i.name.clone(),
+                                    i.rx_kbps.value_or(0.0),
+                                    i.tx_kbps.value_or(0.0),
+                                )
+                            })
+                            .collect();
+                        let total = rates
+                            .iter()
+                            .fold((0.0f32, 0.0f32), |a, (_, r, t)| (a.0 + r, a.1 + t));
+                        v.net_rates = rates.clone();
+                        v.net_total = total;
+                        v.tcp_estab = snap.net.tcp_established;
+                        v.link_speeds = snap
+                            .net
+                            .interfaces
+                            .iter()
+                            .filter(|i| !i.link_speed.is_empty())
+                            .map(|i| (i.name.clone(), i.link_speed.clone()))
+                            .collect();
+                        let refs: Vec<(String, f32, f32)> =
+                            rates.iter().map(|(n, r, t)| (n.clone(), *r, *t)).collect();
+                        sensor_history::record_adapter_rates(&refs);
+                        cx.notify();
+                    });
+                    if ok.is_err() {
+                        return;
+                    }
                 }
-            }
-        })
+            },
+        )
         .detach();
     }
 
@@ -196,48 +229,50 @@ impl DashboardView {
         self.disks_loading = true;
         cx.notify();
 
-        cx.spawn(async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-            let exec = cx.background_executor().clone();
-            let disks = exec.spawn(async move { hardware::list_disks() }).await;
-            log::info!("硬件信息 · 磁盘枚举完成，共 {} 块物理盘", disks.len());
-            if this
-                .update(cx, |v, cx| {
-                    v.disks_loading = false;
-                    v.disks = disks;
-                    cx.notify();
-                })
-                .is_err()
-            {
-                return;
-            }
-            let disks = this.update(cx, |v, _| v.disks.clone()).unwrap_or_default();
-            for d in disks {
-                let id = d.id.clone();
+        cx.spawn(
+            async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
+                let exec = cx.background_executor().clone();
+                let disks = exec.spawn(async move { hardware::list_disks() }).await;
+                log::info!("硬件信息 · 磁盘枚举完成，共 {} 块物理盘", disks.len());
                 if this
                     .update(cx, |v, cx| {
-                        v.smart_loading.push(id.clone());
+                        v.disks_loading = false;
+                        v.disks = disks;
                         cx.notify();
                     })
                     .is_err()
                 {
                     return;
                 }
-                let exec = cx.background_executor().clone();
-                let res = exec.spawn(async move { hardware::read_smart(&id) }).await;
-                let _ = this.update(cx, |v, cx| {
-                    v.smart_loading.retain(|x| x != &d.id);
-                    match res {
-                        Ok(sv) => {
-                            v.smart.insert(d.id.clone(), sv);
-                        }
-                        Err(e) => {
-                            v.disk_error = format!("读取磁盘 {} SMART 失败：{}", d.model, e);
-                        }
+                let disks = this.update(cx, |v, _| v.disks.clone()).unwrap_or_default();
+                for d in disks {
+                    let id = d.id.clone();
+                    if this
+                        .update(cx, |v, cx| {
+                            v.smart_loading.push(id.clone());
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        return;
                     }
-                    cx.notify();
-                });
-            }
-        })
+                    let exec = cx.background_executor().clone();
+                    let res = exec.spawn(async move { hardware::read_smart(&id) }).await;
+                    let _ = this.update(cx, |v, cx| {
+                        v.smart_loading.retain(|x| x != &d.id);
+                        match res {
+                            Ok(sv) => {
+                                v.smart.insert(d.id.clone(), sv);
+                            }
+                            Err(e) => {
+                                v.disk_error = format!("读取磁盘 {} SMART 失败：{}", d.model, e);
+                            }
+                        }
+                        cx.notify();
+                    });
+                }
+            },
+        )
         .detach();
     }
 
@@ -273,29 +308,24 @@ impl DashboardView {
                 card_body(pal)
                     .child(metric_value(pal, main))
                     // 卡内纵向节奏用显式 mt（容器纵向 gap 在 taffy 0.9.0 不生效）
-                    .child(
-                        div()
-                            .mt_2()
-                            .flex_col()
-                            .children(stats.into_iter().map(|(c, text, badge)| {
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .py(px(2.0))
-                                    .child(
-                                        div().text_color(c).text_size(px(12.5)).child(text),
+                    .child(div().mt_2().flex_col().children(stats.into_iter().map(
+                        |(c, text, badge)| {
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .py(px(2.0))
+                                .child(div().text_color(c).text_size(px(12.5)).child(text))
+                                .when_some(badge, |s, b| {
+                                    s.child(
+                                        div()
+                                            .text_size(px(10.0))
+                                            .text_color(pal.text_muted)
+                                            .child(b),
                                     )
-                                    .when_some(badge, |s, b| {
-                                        s.child(
-                                            div()
-                                                .text_size(px(10.0))
-                                                .text_color(pal.text_muted)
-                                                .child(b),
-                                        )
-                                    })
-                            })),
-                    )
+                                })
+                        },
+                    )))
                     .child(
                         // 趋势子组：标签紧贴图表（组内 4px），与统计行间隔 8px
                         div()
@@ -320,17 +350,25 @@ impl DashboardView {
     /// CPU 卡
     fn cpu_card(&self, pal: &Palette, s: &SensorSnapshot) -> Div {
         let cpu = &s.cpu;
-        let temp_text = if cpu.temperature > 0.0 {
-            format!("温度 {:.0}°C", cpu.temperature)
-        } else {
-            "温度 —".to_string()
+        // Metric 语义：None = 不可用（显示 —，不伪造 0）
+        let temp_text = match cpu.temperature.value {
+            Some(t) => format!("温度 {:.0}°C", t),
+            None => "温度 —".to_string(),
+        };
+        let clock_text = match cpu.clock_mhz.value {
+            Some(mhz) if mhz > 0.0 => format!("频率 {:.2} GHz", mhz / 1000.0),
+            _ => "频率 —".to_string(),
         };
         let stats = vec![
-            (pal.text, temp_text, Some(cpu.temp_source.clone())),
+            (
+                pal.text,
+                temp_text,
+                Some(cpu.temperature.source.as_str().to_string()),
+            ),
             (
                 pal.text_dim,
-                format!("频率 {:.2} GHz", cpu.clock_mhz / 1000.0),
-                Some(cpu.freq_source.clone()),
+                clock_text,
+                Some(cpu.clock_mhz.source.as_str().to_string()),
             ),
             (pal.text_muted, format!("{} 核", cpu.core_count), None),
         ];
@@ -355,7 +393,11 @@ impl DashboardView {
                 format!("已用 {:.1} / {:.1} GB", gb(mem.used), gb(mem.total)),
                 Some(format!("{:.0}%", mem.usage_percent)),
             ),
-            (pal.success, format!("可用 {:.1} GB", gb(mem.available)), None),
+            (
+                pal.success,
+                format!("可用 {:.1} GB", gb(mem.available)),
+                None,
+            ),
         ];
         self.stat_card(
             pal,
@@ -376,33 +418,33 @@ impl DashboardView {
                 let stats = vec![
                     (
                         pal.text,
-                        if g.temperature > 0.0 {
-                            format!("温度 {:.0}°C", g.temperature)
-                        } else {
-                            "温度 —".to_string()
+                        match g.temperature.value {
+                            Some(t) => format!("温度 {:.0}°C", t),
+                            None => "温度 —".to_string(),
                         },
                         None,
                     ),
                     (
                         pal.text_dim,
-                        if g.memory_total > 0 {
-                            format!(
-                                "显存 {:.0} / {:.0} GB",
-                                gb(g.memory_used),
-                                gb(g.memory_total)
-                            )
-                        } else {
-                            "显存 —".to_string()
+                        match (g.vram_used.value, g.vram_total.value) {
+                            (Some(u), Some(t)) if t > 0 => {
+                                format!("显存 {:.0} / {:.0} GB", gb(u), gb(t))
+                            }
+                            _ => "显存 —".to_string(),
                         },
                         None,
                     ),
                     (pal.text_muted, g.name.clone(), None),
                 ];
+                let gpu_main = match g.usage.value {
+                    Some(u) => format!("{:.0}%", u),
+                    None => "—".to_string(),
+                };
                 self.stat_card(
                     pal,
                     "GPU",
                     pal.warning,
-                    format!("{:.0}%", g.usage),
+                    gpu_main,
                     stats,
                     window_vals(&self.hist_gpu),
                     pal.warning,
@@ -579,7 +621,12 @@ impl DashboardView {
             );
 
         card(pal)
-            .child(card_header_accent(pal, "磁盘存储 · SMART 健康", pal.text_muted))            .child(card_divider(pal))
+            .child(card_header_accent(
+                pal,
+                "磁盘存储 · SMART 健康",
+                pal.text_muted,
+            ))
+            .child(card_divider(pal))
             .child(body)
     }
 
@@ -704,18 +751,12 @@ impl DashboardView {
 
         // 协商速度：选中网卡优先，否则取流量最大的已连接口
         let speed_line = {
-            let name = selected.clone().or_else(|| {
-                self.net_rates
-                    .first()
-                    .map(|(n, _, _)| n.clone())
-            });
-            name.and_then(|n| {
-                self.link_speeds.get(&n).cloned().map(|sp| (n, sp))
-            })
-            .map(|(n, sp)| {
-                format!("协商速度 {}（{}）", sp, n)
-            })
-            .unwrap_or_else(|| "协商速度 —".to_string())
+            let name = selected
+                .clone()
+                .or_else(|| self.net_rates.first().map(|(n, _, _)| n.clone()));
+            name.and_then(|n| self.link_speeds.get(&n).cloned().map(|sp| (n, sp)))
+                .map(|(n, sp)| format!("协商速度 {}（{}）", sp, n))
+                .unwrap_or_else(|| "协商速度 —".to_string())
         };
 
         let mut body = card_body(pal);
@@ -818,20 +859,14 @@ impl DashboardView {
                         .text_size(px(15.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(pal.text)
-                        .child(SharedString::from(format!(
-                            "↓ {}",
-                            fmt_kbps(cur_rx)
-                        ))),
+                        .child(SharedString::from(format!("↓ {}", fmt_kbps(cur_rx)))),
                 )
                 .child(
                     div()
                         .text_size(px(15.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(pal.text)
-                        .child(SharedString::from(format!(
-                            "↑ {}",
-                            fmt_kbps(cur_tx)
-                        ))),
+                        .child(SharedString::from(format!("↑ {}", fmt_kbps(cur_tx)))),
                 )
                 .child(
                     div()
@@ -852,8 +887,8 @@ impl DashboardView {
                     .child("等待网络采样…"),
             );
         } else {
-            body = body.child(
-                div().mt_2().flex_col().children(rows.into_iter().map(|(name, rx, tx)| {
+            body = body.child(div().mt_2().flex_col().children(rows.into_iter().map(
+                |(name, rx, tx)| {
                     let is_sel = selected.as_deref() == Some(name.as_str());
                     div()
                         .flex()
@@ -888,8 +923,8 @@ impl DashboardView {
                                 .text_color(pal.text_muted)
                                 .child(SharedString::from(format!("↑ {}", fmt_kbps(*tx)))),
                         )
-                })),
-            );
+                },
+            )));
         }
 
         card(pal)
@@ -911,9 +946,7 @@ impl Render for DashboardView {
         let disk = self.disk_card(&pal, cx).flex_1().min_w(px(0.0));
         let trend = self.net_trend_card(&pal).flex_1().min_w(px(0.0));
         let traffic = self.net_traffic_card(&pal, cx).flex_1().min_w(px(0.0));
-        let row = |a: gpui::Div, b: gpui::Div| {
-            div().flex().gap(px(ROW_GAP)).child(a).child(b)
-        };
+        let row = |a: gpui::Div, b: gpui::Div| div().flex().gap(px(ROW_GAP)).child(a).child(b);
 
         let diag = if s.diag.is_empty() {
             "diag: 采集就绪".to_string()
@@ -949,57 +982,6 @@ impl Render for DashboardView {
 // 采样与推导辅助
 // ---------------------------------------------------------------------------
 
-/// 网络单拍采样（后台线程执行；全微秒级 Win32 调用）
-struct NetSample {
-    t: u64,
-    map: HashMap<String, (u64, u64)>,
-    tcp: u32,
-    speeds: HashMap<String, String>,
-}
-
-fn sample_net_once() -> NetSample {
-    NetSample {
-        t: now_ms(),
-        map: secm_core::netif::if_bytes_map(),
-        tcp: secm_core::netif::tcp_connection_count(),
-        speeds: secm_core::netif::link_speeds(),
-    }
-}
-
-/// 累计字节差分 → 每网卡速率（KB/s）+ 总量；首拍无基线返回空集
-fn diff_rates(
-    prev: Option<&(u64, HashMap<String, (u64, u64)>)>,
-    map: &HashMap<String, (u64, u64)>,
-    t: u64,
-) -> (Vec<(String, f32, f32)>, (f32, f32)) {
-    let mut rates: Vec<(String, f32, f32)> = Vec::new();
-    let mut total = (0.0f32, 0.0f32);
-    if let Some((pt, pmap)) = prev {
-        let dt = (t.saturating_sub(*pt)) as f32 / 1000.0;
-        if dt >= 0.05 {
-            for (name, (rx, tx)) in map {
-                if let Some((prx, ptx)) = pmap.get(name) {
-                    let drx = if rx >= prx {
-                        (*rx - prx) as f32 / dt / 1024.0
-                    } else {
-                        0.0
-                    };
-                    let dtx = if tx >= ptx {
-                        (*tx - ptx) as f32 / dt / 1024.0
-                    } else {
-                        0.0
-                    };
-                    total.0 += drx;
-                    total.1 += dtx;
-                    rates.push((name.clone(), drx, dtx));
-                }
-            }
-        }
-    }
-    rates.sort_by(|a, b| a.0.cmp(&b.0));
-    (rates, total)
-}
-
 /// SMART 状态推导：(健康, 风险关注, 明细)。
 /// 黄色"关注" = 健康但存在劣化前兆（NVMe 寿命 ≥80% / 媒体错误 / 备用空间逼近阈值）。
 fn smart_state(sv: &DiskSmartView) -> (bool, bool, String) {
@@ -1018,7 +1000,11 @@ fn smart_state(sv: &DiskSmartView) -> (bool, bool, String) {
             risk = true;
         }
     }
-    (sv.summary.healthy, risk && sv.summary.healthy, sv.summary.detail.clone())
+    (
+        sv.summary.healthy,
+        risk && sv.summary.healthy,
+        sv.summary.detail.clone(),
+    )
 }
 
 /// 磁盘温度（NVMe 健康日志 → WMI → ATA 194/190 属性，单位 °C）
@@ -1045,7 +1031,11 @@ fn disk_temp(sv: &DiskSmartView) -> Option<f32> {
 /// 取 60s 窗口内的数值序列（趋势图渲染输入）
 fn window_vals(points: &[HistoryPoint]) -> Vec<f32> {
     let cutoff = now_ms().saturating_sub(CHART_WINDOW_MS);
-    points.iter().filter(|p| p.t >= cutoff).map(|p| p.v).collect()
+    points
+        .iter()
+        .filter(|p| p.t >= cutoff)
+        .map(|p| p.v)
+        .collect()
 }
 
 fn now_ms() -> u64 {

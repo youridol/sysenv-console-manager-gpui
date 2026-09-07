@@ -5,10 +5,11 @@
 // 后该功能未恢复，需在新克隆壳侧栏复原。本模块为数据面（datasource/core 编排），
 // UI 渲染在 pi_clone::shell 的侧栏网络信息卡。
 //
-// 数据来源：
+// 数据来源（ADR-0006 统一后）：
+// - 已连接网卡 / 本地 IPv4：datasource netif::adapter_configs()（GetAdaptersAddresses）
 // - 协商速率：datasource netif::link_speeds()（GetIfTable2，Alias → "1 Gbps"）
-// - 本地 IPv4 / Up 网卡名：datasource netif::adapter_configs()（GetAdaptersAddresses）
-// - 实时上下行：datasource net_io::get_net_io_speed_map()（PDH Network Interface，KB/s）
+// - 实时上下行：SensorService 统一快照（GetIfTable2 差分，唯一权威来源；
+//   原 PDH Network Interface 来源已按 LiteMonitor 迁移下线）
 // - 公网 IPv4 国内出口：members.3322.org/dyndns/getip（国内 DDNS 回显，国内线路可达）
 // - 公网 IPv4/IPv6 当前出口：ipify（api.ipify.org / api64.ipify.org，纯文本回显）
 // - 公网归属（国内/国外）：ip-api.com countryCode（CN=国内，其余=国外）
@@ -224,22 +225,34 @@ fn query_region(ip: &str) -> Result<String, String> {
 
 /// 刷新本地链路字段（已连接网卡名/协商速率/本地 IPv4/实时上下行速率）。
 ///
-/// 轻量、无网络请求（仅 GetAdaptersAddresses + GetIfTable2 + PDH，微秒~毫秒级），
-/// 供侧栏 1~2s 轮询实时速率。PDH 速率首次调用建基线，此后每次返回最近 ~1s 均值。
+/// 轻量、无网络请求（GetAdaptersAddresses + GetIfTable2 + 统一快照读取，微秒~毫秒级），
+/// 供侧栏 1~2s 轮询实时速率。
 ///
 /// 主体网卡选择与速率匹配（实测真机语义）：
 /// - 「已连接」= Up 且首个 IPv4 非 APIPA(169.254) 的网卡（真实拿到地址者）；
 ///   全部 APIPA 或无 Up 则取首个 Up。
-/// - PDH Network Interface 只有**物理网卡**实例（键=描述名）；虚拟交换器/桥接卡
-///   （Hyper-V vEthernet*）不上 PDH，其真实流量由所桥物理卡计数。故速率匹配：
-///   ① 直接按主体卡 description/name 匹配 io；② 匹配不到（桥接虚拟卡）时，取 io
-///   中当前流量最大的物理实例作为承载速率，并把 rate_source 标注该实例描述，
-///   供 UI 展示「经 XX 网卡」。
+/// - 速率来源：SensorService 统一快照（GetIfTable2 差分，键=接口别名）；
+///   GetIfTable2 的 Alias 与 GetAdaptersAddresses 的 FriendlyName 同源。
+/// - 桥接虚拟卡（Hyper-V vEthernet*）无独立物理计数：取快照中当前流量最大的
+///   物理实例作为承载速率，并把 rate_source 标注该实例名，供 UI 展示「经 XX 网卡」。
 pub fn refresh_local_rate(info: &mut NetInfo) {
+    // ---- 统一快照（网络速率唯一权威来源；未启动服务时为空快照）----
+    let snap = crate::sensor_service::SensorService::snapshot();
+    let io: HashMap<String, (f32, f32)> = snap
+        .net
+        .interfaces
+        .iter()
+        .map(|i| {
+            (
+                i.name.clone(),
+                (i.rx_kbps.value_or(0.0), i.tx_kbps.value_or(0.0)),
+            )
+        })
+        .collect();
+
     // ---- 本地链路：主体网卡选择 + IPv4 + 协商速率 ----
     let adapters = secm_datasource::netif::adapter_configs().unwrap_or_default();
     let speeds: HashMap<String, String> = secm_datasource::netif::link_speeds().unwrap_or_default();
-    let io: HashMap<String, (f32, f32)> = secm_datasource::net_io::get_net_io_speed_map();
 
     info.adapter_name.clear();
     info.local_ipv4.clear();
@@ -271,10 +284,10 @@ pub fn refresh_local_rate(info: &mut NetInfo) {
             .cloned()
             .unwrap_or_default();
 
-        // 实时上下行：PDH 键 = 物理网卡描述名
+        // 实时上下行：统一快照键 = 接口别名（与 FriendlyName 同源）
         let (rx, tx) = io
-            .get(&up.description)
-            .or_else(|| io.get(&up.name))
+            .get(&up.name)
+            .or_else(|| io.get(&up.description))
             .copied()
             .unwrap_or_default();
         if rx > 0.0 || tx > 0.0 {
@@ -284,15 +297,12 @@ pub fn refresh_local_rate(info: &mut NetInfo) {
             };
             info.rate_source = up.description.clone();
         } else {
-            // 主体卡自身无 PDH 实例/零速率（虚拟桥）：取 io 中流量最大的物理实例
-            if let Some((desc, (brx, btx))) = io
-                .iter()
-                .max_by(|a, b| {
-                    let at = a.1 .0 + a.1 .1;
-                    let bt = b.1 .0 + b.1 .1;
-                    at.partial_cmp(&bt).unwrap_or(std::cmp::Ordering::Equal)
-                })
-            {
+            // 主体卡自身无计数实例/零速率（虚拟桥）：取快照中流量最大的实例
+            if let Some((desc, (brx, btx))) = io.iter().max_by(|a, b| {
+                let at = a.1 .0 + a.1 .1;
+                let bt = b.1 .0 + b.1 .1;
+                at.partial_cmp(&bt).unwrap_or(std::cmp::Ordering::Equal)
+            }) {
                 info.rate = NetRate {
                     rx_kbps: *brx,
                     tx_kbps: *btx,
@@ -320,11 +330,13 @@ pub fn refresh_public(info: &mut NetInfo) {
 
     // ---- 公网 v4 · 国内（国内端点专取）----
     match fetch_domestic_v4() {
-        Ok((ip, region)) if region == "国内" => info.pub_v4_domestic = PublicIpEntry {
-            ip,
-            region,
-            diag: String::new(),
-        },
+        Ok((ip, region)) if region == "国内" => {
+            info.pub_v4_domestic = PublicIpEntry {
+                ip,
+                region,
+                diag: String::new(),
+            }
+        }
         Ok((ip, region)) => {
             // 国内端点返回了非国内归属（异常/被代理）—— 仍展示但标注区域，避免丢数据
             info.pub_v4_domestic = PublicIpEntry {
@@ -367,16 +379,20 @@ pub fn refresh_public(info: &mut NetInfo) {
 
     // ---- 公网 v6（ipify 当前 v6 出口，按归属填国内/国外）----
     match fetch_public_ip(IpFamily::V6) {
-        Ok((ip, region)) if region == "国内" => info.pub_v6_domestic = PublicIpEntry {
-            ip,
-            region,
-            diag: String::new(),
-        },
-        Ok((ip, region)) => info.pub_v6_abroad = PublicIpEntry {
-            ip,
-            region,
-            diag: String::new(),
-        },
+        Ok((ip, region)) if region == "国内" => {
+            info.pub_v6_domestic = PublicIpEntry {
+                ip,
+                region,
+                diag: String::new(),
+            }
+        }
+        Ok((ip, region)) => {
+            info.pub_v6_abroad = PublicIpEntry {
+                ip,
+                region,
+                diag: String::new(),
+            }
+        }
         Err(e) => {
             info.pub_v6_abroad.diag = e.clone();
             info.pub_v6_domestic.diag = e;

@@ -27,6 +27,15 @@
 // LHM 打不开设备时不抛异常（返回空/0 值），故显式预检 PawnIO 设备 + 过滤无效温度。
 // 日志同时输出 stdout/stderr 与 %TEMP%\secm-lhm-sidecar.log（提权子进程脱离
 // SECM 重定向管道后，文件是可靠排障通道）。
+//
+// 契约 v3（LiteMonitor 迁移 ADR-0006）：
+//   - Storage 启用（磁盘温度）：30s 慢速刷新（HDD 休眠保护；温度为慢变指标）
+//   - Battery 启用（电量/功率/电流/电压；符号修正由 SECM 主程序按 AC 状态执行）
+//   - 主板传感器新增 hw 字段（所属硬件名，SuperIO 替换为主板名）——风扇/水泵匹配键
+//   - CPU 电压匹配排除 soc/gt/sa/aux（LiteMonitor SensorMatcher 等价）
+//   - GPU 时钟/功耗熔断（>6000MHz / >1200W → null，LiteMonitor 等价）
+//   - GPU 显存：核显（Intel 非 Arc 独显）Shared 优先，独显专用/通用（LiteMonitor 等价）
+//   - Controller 开启（Cooler/USB 风扇控制器；LiteMonitor 风扇监控语义）
 
 using System.ComponentModel;
 using System.Diagnostics;
@@ -91,6 +100,9 @@ sealed class MotherboardSensorData
     public string Name { get; set; } = string.Empty;
     /// 传感器类型："temperature"|"fan"|"voltage"（LHM SensorType 映射）
     public string Type { get; set; } = string.Empty;
+    /// 所属硬件名（SuperIO 已替换为主板名——LiteMonitor GenerateSmartName 等价；
+    /// 风扇/水泵智能匹配的硬件键，如 Kraken/Corsair 散热设备识别）
+    public string Hw { get; set; } = string.Empty;
     /// 传感器当前值（温度℃ / 风扇 RPM / 电压 V）
     public double Value { get; set; }
 }
@@ -115,6 +127,28 @@ sealed class MemoryData
     public long? UsedBytes { get; set; }
 }
 
+/// 磁盘温度数据（LHM Storage 温度传感器；30s 慢速刷新）。
+sealed class StorageSensorData
+{
+    /// 磁盘名称（LHM Storage 硬件节点名，如 "Samsung SSD 980 PRO 1TB"）
+    public string Name { get; set; } = string.Empty;
+    /// 盘温度（℃；无有效温度传感器则 null）
+    public double? TempC { get; set; }
+}
+
+/// 电池数据（LHM Battery；原始值，符号修正由 SECM 主程序按 AC 状态执行）。
+sealed class BatterySensorData
+{
+    /// 电量 %（LHM Level 传感器，优先 Charge Level；排除 Degradation/Wear）
+    public double? Percent { get; set; }
+    /// 功率 W（LHM Power 传感器原始值）
+    public double? PowerW { get; set; }
+    /// 电流 A（LHM Current 传感器原始值）
+    public double? CurrentA { get; set; }
+    /// 电压 V（LHM Voltage 传感器）
+    public double? VoltageV { get; set; }
+}
+
 /// 传感器响应整体（HTTP /api/lhm/sensors 的 JSON 体）。
 sealed class SensorSnapshot
 {
@@ -122,8 +156,8 @@ sealed class SensorSnapshot
     public bool Available { get; set; }
     /// 不可用时的错误描述（含驱动/权限原因，供 SECM 引导卡复用）
     public string? Error { get; set; }
-    /// sidecar 契约版本（本次=2；旧 SECM 忽略未知字段、新 SECM 不依赖旧字段 → 向后兼容）
-    public int ContractVersion { get; set; } = 2;
+    /// sidecar 契约版本（本次=3；新增 storage[]/battery/hw 字段，旧 SECM 忽略未知字段 → 向后兼容）
+    public int ContractVersion { get; set; } = 3;
     /// CPU 传感器数据
     public CpuSensorData Cpu { get; set; } = new();
     /// GPU 传感器数组（无 GPU/枚举不到时为空数组）
@@ -132,36 +166,15 @@ sealed class SensorSnapshot
     public MotherboardData? Motherboard { get; set; }
     /// 内存数据（SPD + 容量；LHM 内存不可用时为 null）
     public MemoryData? Memory { get; set; }
+    /// 磁盘温度数组（LHM Storage；30s 慢速刷新）
+    public List<StorageSensorData> Storage { get; set; } = new();
+    /// 电池数据（LHM Battery；台式机/未启用时为 null）
+    public BatterySensorData? Battery { get; set; }
 }
 
 // ============================================================================
-// LHM 硬件树遍历（刷新传感器读数）
+// LHM 硬件树遍历（采集 Visitor 见 ScheduledVisitor：分类型节拍刷新）
 // ============================================================================
-
-/// LHM 官方推荐遍历方式：VisitComputer 触发整棵硬件树 Update()。
-sealed class UpdateVisitor : IVisitor
-{
-    public void VisitComputer(IComputer computer) => computer.Traverse(this);
-
-    public void VisitHardware(IHardware hardware)
-    {
-        hardware.Update();
-        foreach (IHardware sub in hardware.SubHardware)
-        {
-            sub.Accept(this);
-        }
-    }
-
-    public void VisitSensor(ISensor sensor)
-    {
-        // 传感器值在硬件 Update 时已刷新，无需额外处理
-    }
-
-    public void VisitParameter(IParameter parameter)
-    {
-        // 参数（可调阈值等）本 sidecar 不消费
-    }
-}
 
 // ============================================================================
 // 程序入口
@@ -450,7 +463,9 @@ static class Program
     // LHM 采集
     // ============================================================================
 
-    /// 创建 LHM Computer 组件：启用 CPU/GPU/主板/内存四类枚举（其余保持 false，控制遍历开销）。
+    /// 创建 LHM Computer 组件：启用 CPU/GPU/主板/内存/存储/电池六类枚举（PSU/Network 关闭）。
+    /// Controller 开启：Cooler/USB 风扇控制器覆盖（LiteMonitor 风扇监控语义；USB 冲突风险
+    /// 由 ADR-0007 记录）。
     /// 注意：IsGpuEnabled 下 LHM 0.9.6 经 NVAPI/ADL 动态加载显卡驱动自带原生 DLL（nvapi64.dll /
     /// atiadlxx.dll 等，位于系统驱动目录，不需随 publish 分发）；枚举不到 GPU 时 gpu[] 为空数组。
     static Computer CreateComputer()
@@ -461,18 +476,48 @@ static class Program
             IsGpuEnabled = true,
             IsMemoryEnabled = true,
             IsMotherboardEnabled = true,
-            IsControllerEnabled = false,
-            IsStorageEnabled = false,
-            IsBatteryEnabled = false,
+            IsControllerEnabled = true,
+            IsStorageEnabled = true,
+            IsBatteryEnabled = true,
             IsNetworkEnabled = false,
             IsPsuEnabled = false
         };
     }
 
+    /// 分类型采集 Visitor：Storage 每 StorageIntervalTick 拍才 Update 一次
+    /// （HDD 休眠保护：温度为慢变指标，30s 刷新足够；其余硬件每拍 Update）。
+    sealed class ScheduledVisitor : IVisitor
+    {
+        public long Tick;
+
+        public void VisitComputer(IComputer computer) => computer.Traverse(this);
+
+        public void VisitHardware(IHardware hardware)
+        {
+            // Storage 降频：每 30 拍（~30s）Update 一次，其余拍跳过（读 LHM 缓存旧值）
+            bool isStorage = hardware.HardwareType == HardwareType.Storage;
+            if (!isStorage || Tick % StorageIntervalTick == 0)
+            {
+                hardware.Update();
+            }
+            foreach (IHardware sub in hardware.SubHardware)
+            {
+                sub.Accept(this);
+            }
+        }
+
+        public void VisitSensor(ISensor sensor) { }
+
+        public void VisitParameter(IParameter parameter) { }
+    }
+
+    /// Storage 更新节拍间隔（拍；1s 间隔下 = 30s）
+    const long StorageIntervalTick = 30;
+
     /// 后台采集主循环：提权/预检 → Open → 周期刷新传感器 → 更新快照。
     static void CollectionLoop(int intervalMs)
     {
-        var visitor = new UpdateVisitor();
+        var visitor = new ScheduledVisitor();
         var lastInitAttempt = DateTime.MinValue;
 
         while (true)
@@ -509,12 +554,14 @@ static class Program
 
                     _computer = CreateComputer();
                     _computer.Open();   // LHM 自动选择可用 ring0 后端；异常时捕获
+                    visitor.Tick++;
                     _computer.Accept(visitor);
                     UpdateSnapshot();
-                    Log("[LhmSidecar] LHM opened, CPU sensors available");
+                    Log("[LhmSidecar] LHM opened, sensors available");
                     continue;
                 }
 
+                visitor.Tick++;
                 _computer.Accept(visitor);
                 UpdateSnapshot();
             }
@@ -553,6 +600,8 @@ static class Program
         var gpus = new List<GpuSensorData>();
         MotherboardData? motherboard = null;
         MemoryData? memory = null;
+        var storage = new List<StorageSensorData>();
+        BatterySensorData? battery = null;
         // LHM 0.9.6 会枚举 Virtual/Total 两个 Memory 硬件节点，先收集再合并（优先物理内存 Total 节点）
         var memoryNodes = new List<IHardware>();
 
@@ -575,6 +624,12 @@ static class Program
                     break;
                 case HardwareType.Memory:
                     memoryNodes.Add(hardware);
+                    break;
+                case HardwareType.Storage:
+                    storage.Add(ReadStorageTemp(hardware));
+                    break;
+                case HardwareType.Battery:
+                    battery = ReadBatterySensors(hardware);
                     break;
             }
         }
@@ -616,7 +671,9 @@ static class Program
                 Cpu = cpu,
                 Gpu = gpus,
                 Motherboard = motherboard,
-                Memory = memory
+                Memory = memory,
+                Storage = storage,
+                Battery = battery
             };
         }
     }
@@ -643,6 +700,10 @@ static class Program
         var data = new GpuSensorData { Name = gpu.Name };
         // 无 "GPU Core" 命名时取数值最大者兜底（记录候选，避免把 VRAM 温度误当核心）
         var fallbackTemps = new List<double>();
+        // 显存候选：LiteMonitor SensorMatcher 等价——Shared/Dedicated/Generic 分类后按核显规则择优；
+        // Vendor（非 D3D）命名优先于 D3D 命名（LiteMonitor SensorMap 冲突解决等价）
+        double? vramUsedShared = null, vramUsedVendor = null, vramUsedD3D = null;
+        double? vramTotalShared = null, vramTotalVendor = null, vramTotalD3D = null;
         foreach (ISensor sensor in gpu.Sensors)
         {
             double? value = sensor.Value;
@@ -668,12 +729,13 @@ static class Program
                     }
                     break;
                 case SensorType.Power:
-                    // 功耗取名称含 "GPU Package"/"GPU" 的传感器（NVIDIA "GPU Package"）
+                    // 功耗取名称含 "GPU Package"/"GPU" 的传感器（NVIDIA "GPU Package"）；
+                    // 熔断：>1200W 视为传感器异常（LiteMonitor 等价），输出 null
                     if ((sensor.Name.Contains("GPU Package", StringComparison.OrdinalIgnoreCase)
                             || sensor.Name.Contains("GPU", StringComparison.OrdinalIgnoreCase))
                         && data.PowerW is null)
                     {
-                        data.PowerW = v;
+                        data.PowerW = v > GpuPowerFuseW ? null : v;
                     }
                     break;
                 case SensorType.Fan:
@@ -690,24 +752,40 @@ static class Program
                     }
                     break;
                 case SensorType.Clock:
+                    // 熔断：>6000MHz 视为传感器异常（LiteMonitor 等价），输出 null
                     if (sensor.Name.Contains("GPU Core", StringComparison.OrdinalIgnoreCase)
                         && data.CoreClockMhz is null)
                     {
-                        data.CoreClockMhz = v;
+                        data.CoreClockMhz = v > GpuClockFuseMhz ? null : v;
                     }
                     break;
                 case SensorType.SmallData:
-                    // LHM GPU 显存传感器单位为 MB，换算为字节（1 MB = 1024*1024 B）。
-                    // 精确匹配 "GPU Memory Used"/"GPU Memory Total"（排除 "D3D Dedicated Memory Used" 等同类传感器）
-                    if (sensor.Name.StartsWith("GPU Memory Used", StringComparison.OrdinalIgnoreCase)
-                        && data.MemoryUsedBytes is null)
+                    // 显存候选分类（LiteMonitor SensorMatcher 等价语义，LHM 显存单位 MB → 字节）：
+                    // shared：名含 "shared"；dedicated：名含 "dedicated"（排除）；generic：名含 "memory"
+                    if (sensor.Name.Contains("shared", StringComparison.OrdinalIgnoreCase))
                     {
-                        data.MemoryUsedBytes = (long)Math.Round(v * 1024.0 * 1024.0);
+                        if (sensor.Name.Contains("used", StringComparison.OrdinalIgnoreCase) && vramUsedShared is null)
+                        {
+                            vramUsedShared = v;
+                        }
+                        else if (sensor.Name.Contains("total", StringComparison.OrdinalIgnoreCase) && vramTotalShared is null)
+                        {
+                            vramTotalShared = v;
+                        }
                     }
-                    else if (sensor.Name.StartsWith("GPU Memory Total", StringComparison.OrdinalIgnoreCase)
-                        && data.MemoryTotalBytes is null)
+                    else if (sensor.Name.Contains("memory", StringComparison.OrdinalIgnoreCase)
+                        && !sensor.Name.Contains("dedicated", StringComparison.OrdinalIgnoreCase))
                     {
-                        data.MemoryTotalBytes = (long)Math.Round(v * 1024.0 * 1024.0);
+                        // Vendor（非 D3D）与 D3D 分池，Vendor 优先（LiteMonitor 冲突解决等价）
+                        bool isD3D = sensor.Name.Contains("D3D", StringComparison.OrdinalIgnoreCase);
+                        if (sensor.Name.Contains("used", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (isD3D) { vramUsedD3D ??= v; } else { vramUsedVendor ??= v; }
+                        }
+                        else if (sensor.Name.Contains("total", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (isD3D) { vramTotalD3D ??= v; } else { vramTotalVendor ??= v; }
+                        }
                     }
                     break;
             }
@@ -717,7 +795,47 @@ static class Program
         {
             data.TemperatureC = fallbackTemps.Max();
         }
+        // 显存择优：核显（Intel 非 Arc 独显）Shared 优先 + Vendor/D3D 兜底；
+        // 独显/其他厂商：Vendor > D3D（Block Shared——LiteMonitor 等价）
+        bool preferShared = IsIntelIntegratedGpu(gpu.Name);
+        double? usedFallback = vramUsedVendor ?? vramUsedD3D;
+        double? totalFallback = vramTotalVendor ?? vramTotalD3D;
+        if (preferShared)
+        {
+            data.MemoryUsedBytes = MbToBytes(vramUsedShared) ?? MbToBytes(usedFallback);
+            data.MemoryTotalBytes = MbToBytes(vramTotalShared) ?? MbToBytes(totalFallback);
+        }
+        else
+        {
+            data.MemoryUsedBytes = MbToBytes(usedFallback);
+            data.MemoryTotalBytes = MbToBytes(totalFallback);
+        }
         return data;
+    }
+
+    /// GPU 功耗熔断阈值（W；LiteMonitor ComponentProcessor 等价）
+    const double GpuPowerFuseW = 1200.0;
+    /// GPU 时钟熔断阈值（MHz；LiteMonitor ComponentProcessor 等价）
+    const double GpuClockFuseMhz = 6000.0;
+
+    /// MB → 字节（LHM 显存传感器单位 MB）；输入 null → null
+    static long? MbToBytes(double? mb)
+    {
+        return mb.HasValue ? (long)Math.Round(mb.Value * 1024.0 * 1024.0) : null;
+    }
+
+    /// 判断是否为 Intel 核显（LiteMonitor HardwareRules.ShouldUseSharedMemory 等价）：
+    /// Intel GPU 且非 Arc 独显（A/B/Pro 系列号）。核显优先 Shared 显存语义。
+    static bool IsIntelIntegratedGpu(string name)
+    {
+        if (string.IsNullOrEmpty(name) || !name.Contains("Intel", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+        // Arc 独显特征：" A"/" B"/" Pro"（LiteMonitor IsDiscreteArc 等价）
+        bool discreteArc = name.Contains("Arc", StringComparison.OrdinalIgnoreCase)
+            && (name.Contains(" A") || name.Contains(" B") || name.Contains(" Pro"));
+        return !discreteArc;
     }
 
     /// 读取主板节点 + SuperIO 子硬件的温度/风扇/电压传感器（name 保留原始名）。
@@ -729,6 +847,8 @@ static class Program
     }
 
     /// 递归收集主板节点下（含 SuperIO 子硬件）的温度/风扇/电压传感器。
+    /// hw 字段 = 所属硬件名（SuperIO 替换为主板名——LiteMonitor GenerateSmartName 等价，
+    /// 供风扇/水泵智能匹配识别散热设备硬件）。
     static void CollectSubHardwareSensors(IHardware hardware, List<MotherboardSensorData> sensors)
     {
         foreach (ISensor sensor in hardware.Sensors)
@@ -749,12 +869,99 @@ static class Program
             {
                 continue;
             }
-            sensors.Add(new MotherboardSensorData { Name = sensor.Name, Type = type, Value = value.Value });
+            // SuperIO 子硬件名替换为主板名（LiteMonitor GenerateSmartName 等价）
+            string hwName = hardware.HardwareType == HardwareType.SuperIO
+                ? (hardware.Parent?.Name ?? hardware.Name)
+                : hardware.Name;
+            sensors.Add(new MotherboardSensorData
+            {
+                Name = sensor.Name,
+                Type = type,
+                Hw = hwName,
+                Value = value.Value
+            });
         }
         foreach (IHardware sub in hardware.SubHardware)
         {
             CollectSubHardwareSensors(sub, sensors);
         }
+    }
+
+    /// 读取磁盘温度（LHM Storage；FindBestTempSensor 等价——排除名含 warning/critical
+    /// 的告警阈值传感器，优先名恰为 "Temperature" 的传感器，否则取第一个）。
+    static StorageSensorData ReadStorageTemp(IHardware storage)
+    {
+        var data = new StorageSensorData { Name = storage.Name };
+        ISensor? best = null;
+        foreach (ISensor s in storage.Sensors)
+        {
+            if (s.SensorType != SensorType.Temperature)
+            {
+                continue;
+            }
+            if (s.Name.Contains("warning", StringComparison.OrdinalIgnoreCase) ||
+                s.Name.Contains("critical", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            if (s.Name == "Temperature")
+            {
+                best = s;
+                break;
+            }
+            best ??= s;
+        }
+        if (best?.Value is float v && double.IsFinite(v) && v > 0.0)
+        {
+            data.TempC = v;
+        }
+        return data;
+    }
+
+    /// 读取电池传感器（LHM Battery；原始值输出，符号修正由 SECM 主程序执行）。
+    /// Percent：Level 类型（优先名含 Charge，排除 Degradation/Wear——LiteMonitor 等价）。
+    static BatterySensorData ReadBatterySensors(IHardware battery)
+    {
+        var data = new BatterySensorData();
+        foreach (ISensor s in battery.Sensors)
+        {
+            double? value = s.Value;
+            if (!value.HasValue || !double.IsFinite(value.Value) || value.Value <= 0.0)
+            {
+                // 空闲电池电流可能为 0——视为无值（真实语义）
+                continue;
+            }
+            double v = value.Value;
+            switch (s.SensorType)
+            {
+                case SensorType.Level:
+                    // 排除电池损耗/健康度（LiteMonitor 同规则）；优先含 Charge 的电量传感器
+                    if (s.Name.Contains("Degradation", StringComparison.OrdinalIgnoreCase) ||
+                        s.Name.Contains("Wear", StringComparison.OrdinalIgnoreCase))
+                    {
+                        break;
+                    }
+                    if (s.Name.Contains("Charge", StringComparison.OrdinalIgnoreCase))
+                    {
+                        data.Percent ??= v;
+                    }
+                    else
+                    {
+                        data.Percent ??= v; // 其他 Level 作为备选（LiteMonitor 弱备选同语义）
+                    }
+                    break;
+                case SensorType.Power:
+                    data.PowerW ??= v;
+                    break;
+                case SensorType.Voltage:
+                    data.VoltageV ??= v;
+                    break;
+                case SensorType.Current:
+                    data.CurrentA ??= v;
+                    break;
+            }
+        }
+        return data;
     }
 
     /// 读取内存节点：容量/已用由 LHM 传感器推算（不伪造），SPD 型号仅首次读取缓存（静态数据）。
@@ -859,7 +1066,17 @@ static class Program
                     }
                     break;
                 case SensorType.Voltage:
-                    if (data.VoltageV is null)
+                    // LiteMonitor SensorMatcher CPU.Voltage 等价：名含 core/cpu/vcore/vid，
+                    // 排除 soc/gt/sa/aux 片上系统/核显/供电干扰项
+                    if (data.VoltageV is null
+                        && (sensor.Name.Contains("core", StringComparison.OrdinalIgnoreCase)
+                            || sensor.Name.Contains("cpu", StringComparison.OrdinalIgnoreCase)
+                            || sensor.Name.Contains("vcore", StringComparison.OrdinalIgnoreCase)
+                            || sensor.Name.Contains("vid", StringComparison.OrdinalIgnoreCase))
+                        && !sensor.Name.Contains("soc", StringComparison.OrdinalIgnoreCase)
+                        && !sensor.Name.Contains("gt", StringComparison.OrdinalIgnoreCase)
+                        && !sensor.Name.Contains("sa", StringComparison.OrdinalIgnoreCase)
+                        && !sensor.Name.Contains("aux", StringComparison.OrdinalIgnoreCase))
                     {
                         data.VoltageV = value.Value;
                     }
@@ -1088,7 +1305,7 @@ static class Program
         }
         catch (Exception ex)
         {
-            return $"{{\"available\":false,\"error\":\"LHM 快照序列化失败: {ex.GetType().Name}: {ex.Message}\",\"contract_version\":2,\"gpu\":[],\"motherboard\":null,\"memory\":null,\"cpu\":{{\"package_temp_c\":null,\"core_temps_c\":[],\"power_w\":null,\"fan_rpm\":null,\"voltage_v\":null}}}}";
+            return $"{{\"available\":false,\"error\":\"LHM 快照序列化失败: {ex.GetType().Name}: {ex.Message}\",\"contract_version\":3,\"gpu\":[],\"motherboard\":null,\"memory\":null,\"storage\":[],\"battery\":null,\"cpu\":{{\"package_temp_c\":null,\"core_temps_c\":[],\"power_w\":null,\"fan_rpm\":null,\"voltage_v\":null}}}}";
         }
     }
 }

@@ -1,5 +1,6 @@
 // secm-core::lhm — LHM sidecar（LibreHardwareMonitor .NET 进程）客户端
 // 契约对齐源 v1.19.0 lhm.rs：HTTP 45980 JSON；主程序仅做进程探测/启动 + 轮询。
+// 契约 v3（ADR-0006）：+storage[]（磁盘温度）+battery（电池）+mb hw 字段。
 // 许可：LibreHardwareMonitorLib MPL-2.0（隔离于 sidecar 进程内，随包分发源码与许可）。
 
 use serde::Deserialize;
@@ -54,6 +55,9 @@ pub struct LhmMbSensor {
     pub name: String,
     #[serde(rename = "type")]
     pub kind: String,
+    /// 所属硬件名（v3：SuperIO 已替换为主板名；风扇/水泵匹配键）
+    #[serde(default)]
+    pub hw: String,
     pub value: f32,
 }
 
@@ -72,6 +76,24 @@ pub struct LhmMemoryData {
     pub used_bytes: Option<u64>,
 }
 
+/// 磁盘温度（v3 契约：LHM Storage，30s 慢速刷新）
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct LhmStorageTemp {
+    pub name: String,
+    pub temp_c: Option<f32>,
+}
+
+/// 电池数据（v3 契约：LHM Battery 原始值；符号修正由 sensor_service 执行）
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct LhmBatteryData {
+    pub percent: Option<f32>,
+    pub power_w: Option<f32>,
+    pub current_a: Option<f32>,
+    pub voltage_v: Option<f32>,
+}
+
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default)]
 pub struct LhmSensorResponse {
@@ -82,6 +104,12 @@ pub struct LhmSensorResponse {
     pub gpu: Vec<LhmGpuData>,
     pub motherboard: Option<LhmMotherboardData>,
     pub memory: Option<LhmMemoryData>,
+    /// v3：磁盘温度（sidecar 未升级时缺省为空）
+    #[serde(default)]
+    pub storage: Vec<LhmStorageTemp>,
+    /// v3：电池（sidecar 未升级/无电池时为 null）
+    #[serde(default)]
+    pub battery: Option<LhmBatteryData>,
 }
 
 // ============================================================================
@@ -89,8 +117,7 @@ pub struct LhmSensorResponse {
 // ============================================================================
 
 /// 带 TTL 的传感器快照缓存（避免每帧 HTTP；对齐源 2s 窗口）
-static SNAP_CACHE: OnceLock<Mutex<Option<(Instant, LhmSensorResponse, String)>>> =
-    OnceLock::new();
+static SNAP_CACHE: OnceLock<Mutex<Option<(Instant, LhmSensorResponse, String)>>> = OnceLock::new();
 const SNAP_TTL: Duration = Duration::from_secs(2);
 /// 拉取失败退避（P1-4）：失败后该窗口内不再发起 HTTP，
 /// 防 sidecar 掉线时采集线程反复阻塞在 2s 超时上
