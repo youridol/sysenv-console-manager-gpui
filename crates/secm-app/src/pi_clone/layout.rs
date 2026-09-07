@@ -33,6 +33,8 @@ pub const FILE_TREE_MAX_WIDTH: f32 = 520.0;
 
 /// 顶栏高度（native-theme.css 48px !important 覆盖 JSX 36+safe-area）
 pub const TOP_BAR_HEIGHT: f32 = 48.0;
+/// 右侧日志流面板头高度（log_header 与流区 absolute top 依据此常量对齐）
+pub const LOG_PANEL_HEADER_HEIGHT: f32 = 48.0;
 /// 顶栏里 sidebar 展开按钮尺寸（AppShell TOP_BAR_ICON_BUTTON_SIZE=36）
 pub const TOP_BAR_ICON_BUTTON_SIZE: f32 = 36.0;
 /// 右面板开关按钮 34×28（fixed top10 right10）

@@ -6,14 +6,21 @@
 // - 检测结果在后台线程算好、经 WeakEntity 回 UI 直接赋值（主线程绝不重跑查询）；
 // - 安装/升级/卸载为外部命令操作，独立互斥锁防并发执行，但不断言 UI 线程；
 // - 主线程仅做状态赋值与 cx.notify()。
+//
+// 渲染层已接入 crate::ui::page 统一页面布局框架，
+// 色板取自 pi_clone::theme::Palette（明暗双套），随壳主题联动刷新。
 
 use gpui::prelude::*;
-use gpui::{div, px, rgb, SharedString, Window, Context, Render, WeakEntity};
+use gpui::{div, px, SharedString, Window, Context, Render, WeakEntity};
 use secm_core::environment::{
     self, AiExtension, AiTool, McpServerInfo, NpmEnvironment,
 };
 
-use crate::theme::Theme;
+use crate::pi_clone::theme::{Appearance, Palette};
+use crate::ui::page::{
+    banner, button, button_sm, card, card_body, card_divider, card_header, kv_row_w, page_header,
+    page_root, table_empty, BannerKind, ButtonKind,
+};
 
 /// 检测区（每组独立加载状态，可并发）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,10 +63,14 @@ pub struct AiEnvironmentView {
     action_busy: bool,
     /// 状态/结果消息
     status: String,
+    /// 页面外观，随壳主题联动
+    appearance: Appearance,
+    /// 页面滚动状态（GPUI 0.2 滚轮需 track_scroll 手动驱动，见 ui::page::page_root）
+    page_scroll: gpui::ScrollHandle,
 }
 
 impl AiEnvironmentView {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(appearance: Appearance, cx: &mut Context<Self>) -> Self {
         log::info!("AI 环境 · 页面已打开");
         let mut v = Self {
             npm: None,
@@ -72,6 +83,8 @@ impl AiEnvironmentView {
             ext_loading: false,
             action_busy: false,
             status: String::new(),
+            appearance,
+            page_scroll: gpui::ScrollHandle::new(),
         };
         // 四组检测并发启动（各自独立后台任务）
         v.start_detect(DetectKind::Npm, cx);
@@ -79,6 +92,17 @@ impl AiEnvironmentView {
         v.start_detect(DetectKind::Mcp, cx);
         v.start_detect(DetectKind::Ext, cx);
         v
+    }
+
+    /// 当前页面色板（明暗随壳联动）
+    fn pal(&self) -> Palette {
+        Palette::for_appearance(self.appearance)
+    }
+
+    /// 壳切换主题时同步外观（PiShell::toggle_theme 联动调用）
+    pub(crate) fn set_appearance(&mut self, appearance: Appearance, cx: &mut Context<Self>) {
+        self.appearance = appearance;
+        cx.notify();
     }
 
     // ------------------------------------------------------------------
@@ -315,7 +339,7 @@ impl McpAction {
 
 impl Render for AiEnvironmentView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::dark();
+        let pal = self.pal();
         let npm = self.npm.clone();
         let tools: Vec<AiTool> = self.tools.clone();
         let mcps: Vec<McpServerInfo> = self.mcps.clone();
@@ -323,85 +347,48 @@ impl Render for AiEnvironmentView {
         let status = self.status.clone();
         let action_busy = self.action_busy;
 
-        div()
-            .id("ai_environment-page-root")
-            .flex_col()
-            .size_full()
-            .p_6()
-            .gap_4()
-            // 内容超高时整页纵向滚动
-            .overflow_y_scroll()
-            // 页头
+        // 统一页面骨架：根容器（内边距/纵向节奏/内容超高时整页纵向滚动）
+        page_root(&pal, "ai_environment-page-root", &self.page_scroll, &cx.entity())
+            // 页头：标题 + 副标题，右侧「全部刷新」
             .child(
-                div()
-                    .flex()
-                    .items_baseline()
-                    .justify_between()
-                    .child(
-                        div()
-                            .flex()
-                            .items_baseline()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .text_size(px(24.0))
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(theme.text)
-                                    .child("AI 环境"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .text_color(theme.text_muted)
-                                    .child("npm 环境 · AI 工具 · MCP · Skills 扩展"),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("ai-rescan")
-                            .px_4()
-                            .py_1p5()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .bg(theme.panel_hover)
-                            .hover(|s| s.bg(theme.border))
-                            .text_color(theme.text)
-                            .text_size(px(12.5))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.start_detect(DetectKind::Npm, cx);
-                                this.start_detect(DetectKind::Tools, cx);
-                                this.start_detect(DetectKind::Mcp, cx);
-                                this.start_detect(DetectKind::Ext, cx);
-                            }))
-                            .child("全部刷新"),
-                    ),
+                page_header(&pal, "AI 环境", "npm 环境 · AI 工具 · MCP 服务器 · Skills 扩展").child(
+                    button(&pal, ButtonKind::Secondary)
+                        .id("ai-rescan")
+                        .child("全部刷新")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.start_detect(DetectKind::Npm, cx);
+                            this.start_detect(DetectKind::Tools, cx);
+                            this.start_detect(DetectKind::Mcp, cx);
+                            this.start_detect(DetectKind::Ext, cx);
+                        })),
+                ),
             )
             // 状态消息
             .when(!status.is_empty(), |s| {
                 let msg = status.clone();
-                s.child(
-                    div()
-                        .px_4()
-                        .py_2()
-                        .rounded_md()
-                        .bg(theme.panel_hover)
-                        .text_size(px(12.0))
-                        .text_color(theme.info)
-                        .child(msg),
-                )
+                s.child(banner(&pal, BannerKind::Info, msg))
             })
             // npm 环境卡
-            .child(self.npm_card(&theme, &npm, cx))
+            .child(self.npm_card(&pal, &npm, cx))
             // AI 工具卡
-            .child(self.tools_card(&theme, &tools, action_busy, cx))
-            // MCP 卡 + 扩展卡双列
+            .child(self.tools_card(&pal, &tools, action_busy, cx))
+            // MCP 卡 + 扩展卡双列（flex 等宽两列；禁 grid —— taffy grid 滚动容器内不渲染）
             .child(
                 div()
-                    .grid()
-                    .grid_cols(2)
+                    .flex()
                     .gap_4()
-                    .child(self.mcp_card(&theme, &mcps, action_busy, cx))
-                    .child(self.ext_card(&theme, &extensions, cx)),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .child(self.mcp_card(&pal, &mcps, action_busy, cx)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .child(self.ext_card(&pal, &extensions, cx)),
+                    ),
             )
     }
 }
@@ -409,48 +396,28 @@ impl Render for AiEnvironmentView {
 impl AiEnvironmentView {
     fn npm_card(
         &self,
-        theme: &Theme,
+        pal: &Palette,
         npm: &Option<NpmEnvironment>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let loading = self.npm_loading;
-        crate::ui::table_container(theme)
+        card(pal)
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px_5()
-                    .py_3()
-                    .child(
-                        div()
-                            .text_size(px(14.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child("npm 环境"),
-                    )
-                    .child(
-                        div()
-                            .id("ai-npm-refresh")
-                            .px_3()
-                            .py_1()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .bg(theme.panel_hover)
-                            .hover(|s| s.bg(theme.border))
-                            .text_color(theme.text)
-                            .text_size(px(11.5))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.start_detect(DetectKind::Npm, cx);
-                            }))
-                            .child(if loading { "检测中…" } else { "刷新" }),
-                    ),
+                card_header(pal, "npm 环境").child(
+                    button_sm(pal, ButtonKind::Secondary)
+                        .id("ai-npm-refresh")
+                        .child(if loading { "检测中…" } else { "刷新" })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.start_detect(DetectKind::Npm, cx);
+                        })),
+                ),
             )
+            .child(card_divider(pal))
             .when(npm.is_none() && !loading, |s| {
-                s.child(crate::ui::table_empty(theme, "点击「刷新」检测 npm 环境"))
+                s.child(table_empty(pal, "点击「刷新」检测 npm 环境"))
             })
             .when(npm.is_none() && loading, |s| {
-                s.child(crate::ui::table_empty(theme, "检测中…"))
+                s.child(table_empty(pal, "检测中…"))
             })
             .when_some(npm.clone(), |s, n| {
                 let rows = [
@@ -461,79 +428,64 @@ impl AiEnvironmentView {
                     ("registry", n.registry.clone()),
                     ("全局包数", n.global_packages.to_string()),
                 ];
-                s.children(rows.iter().map(|(k, v)| {
+                s.child(card_body(pal).children(rows.iter().map(|(k, v)| {
                     let k = k.to_string();
                     let v = v.clone();
-                    div()
-                        .flex()
-                        .items_center()
-                        .px_5()
-                        .py_1p5()
-                        .border_b_1()
-                        .border_color(theme.border)
-                        .child(
-                            div()
-                                .w(px(110.0))
-                                .flex_none()
-                                .text_size(px(12.0))
-                                .text_color(theme.text_muted)
-                                .child(k),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.5))
-                                .text_color(if v.is_empty() { theme.danger } else { theme.text })
-                                .child(if v.is_empty() { "不可用".to_string() } else { v }),
-                        )
-                }))
+                    if v.is_empty() {
+                        // 值缺失：键值行同款结构，值以 danger 色显示「不可用」
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .py(px(3.0))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .w(px(110.0))
+                                    .text_size(px(12.0))
+                                    .text_color(pal.text_muted)
+                                    .child(k),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .text_size(px(12.5))
+                                    .text_color(pal.danger)
+                                    .child("不可用"),
+                            )
+                    } else {
+                        kv_row_w(pal, 110.0, k, v)
+                    }
+                })))
             })
     }
 
     fn tools_card(
         &self,
-        theme: &Theme,
+        pal: &Palette,
         tools: &[AiTool],
         action_busy: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let loading = self.tools_loading;
-        crate::ui::table_container(theme)
+        card(pal)
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px_5()
-                    .py_3()
-                    .child(
-                        div()
-                            .text_size(px(14.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child("AI 开发工具"),
-                    )
-                    .child(
-                        div()
-                            .id("ai-tools-refresh")
-                            .px_3()
-                            .py_1()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .bg(theme.panel_hover)
-                            .hover(|s| s.bg(theme.border))
-                            .text_color(theme.text)
-                            .text_size(px(11.5))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.start_detect(DetectKind::Tools, cx);
-                            }))
-                            .child(if loading { "检测中…" } else { "刷新" }),
-                    ),
+                card_header(pal, "AI 开发工具").child(
+                    button_sm(pal, ButtonKind::Secondary)
+                        .id("ai-tools-refresh")
+                        .child(if loading { "检测中…" } else { "刷新" })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.start_detect(DetectKind::Tools, cx);
+                        })),
+                ),
             )
+            .child(card_divider(pal))
             .when(tools.is_empty() && loading, |s| {
-                s.child(crate::ui::table_empty(theme, "检测中…（npm 查询）"))
+                s.child(table_empty(pal, "检测中…（npm 查询）"))
             })
             .when(tools.is_empty() && !loading, |s| {
-                s.child(crate::ui::table_empty(theme, "暂无数据 — 点击「刷新」"))
+                s.child(table_empty(pal, "暂无数据 — 点击「刷新」"))
             })
             .children(tools.iter().map(|t| {
                 let tool = t.clone();
@@ -554,40 +506,32 @@ impl AiEnvironmentView {
                     .px_5()
                     .py_2()
                     .border_b_1()
-                    .border_color(theme.border)
+                    .border_color(pal.border)
                     .child(
                         div()
                             .size(px(6.0))
                             .rounded_full()
-                            .bg(if installed { theme.success } else { theme.text_muted }),
+                            .bg(if installed { pal.success } else { pal.text_muted }),
                     )
                     .child(
                         div()
                             .w(px(110.0))
                             .flex_none()
                             .text_size(px(12.5))
-                            .text_color(theme.text)
+                            .text_color(pal.text)
                             .child(name),
                     )
                     .child(
                         div()
                             .flex_1()
                             .text_size(px(11.5))
-                            .text_color(theme.text_muted)
+                            .text_color(pal.text_muted)
                             .child(if installed { version } else { "未安装".to_string() }),
                     )
                     .when(installed && upgradable, |r| {
                         r.child(
-                            div()
+                            button_sm(pal, ButtonKind::Warning)
                                 .id("upgrade-tool")
-                                .px_2()
-                                .py_0p5()
-                                .rounded_sm()
-                                .cursor_pointer()
-                                .bg(rgb(0x78350f))
-                                .hover(|s| s.bg(rgb(0x92400e)))
-                                .text_color(rgb(0xfde68a))
-                                .text_size(px(11.0))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if !disabled {
                                         this.run_tool_action(ToolAction::Upgrade(pkg_upgrade.clone()), cx);
@@ -601,32 +545,32 @@ impl AiEnvironmentView {
                             .flex()
                             .gap_1()
                             .child(
-                                div()
-                                    .id("install-tool")
-                                    .px_2()
-                                    .py_0p5()
-                                    .rounded_sm()
-                                    .cursor_pointer()
-                                    .bg(if installed { theme.panel_hover } else { theme.brand })
-                                    .hover(|s| s.bg(if installed { theme.border } else { rgb(0x3d66e6) }))
-                                    .text_color(if installed { theme.text } else { rgb(0xffffff) })
-                                    .text_size(px(11.0))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        if !disabled {
-                                            if installed {
-                                                this.run_tool_action(
-                                                    ToolAction::Uninstall(pkg_uninstall.clone()),
-                                                    cx,
-                                                );
-                                            } else {
-                                                this.run_tool_action(
-                                                    ToolAction::Install(pkg_install.clone()),
-                                                    cx,
-                                                );
-                                            }
+                                // 已装=卸载（Danger）/ 未装=安装（Primary），按钮随状态切换语义
+                                button_sm(
+                                    pal,
+                                    if installed {
+                                        ButtonKind::Danger
+                                    } else {
+                                        ButtonKind::Primary
+                                    },
+                                )
+                                .id("install-tool")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if !disabled {
+                                        if installed {
+                                            this.run_tool_action(
+                                                ToolAction::Uninstall(pkg_uninstall.clone()),
+                                                cx,
+                                            );
+                                        } else {
+                                            this.run_tool_action(
+                                                ToolAction::Install(pkg_install.clone()),
+                                                cx,
+                                            );
                                         }
-                                    }))
-                                    .child(if installed { "卸载" } else { "安装" }),
+                                    }
+                                }))
+                                .child(if installed { "卸载" } else { "安装" }),
                             ),
                     )
             }))
@@ -634,44 +578,24 @@ impl AiEnvironmentView {
 
     fn mcp_card(
         &self,
-        theme: &Theme,
+        pal: &Palette,
         mcps: &[McpServerInfo],
         action_busy: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let loading = self.mcps_loading;
-        crate::ui::table_container(theme)
+        card(pal)
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px_5()
-                    .py_3()
-                    .child(
-                        div()
-                            .text_size(px(14.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child("MCP 服务器"),
-                    )
-                    .child(
-                        div()
-                            .id("mcp-refresh")
-                            .px_3()
-                            .py_1()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .bg(theme.panel_hover)
-                            .hover(|s| s.bg(theme.border))
-                            .text_color(theme.text)
-                            .text_size(px(11.5))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.start_detect(DetectKind::Mcp, cx);
-                            }))
-                            .child(if loading { "检测中…" } else { "刷新" }),
-                    ),
+                card_header(pal, "MCP 服务器").child(
+                    button_sm(pal, ButtonKind::Secondary)
+                        .id("mcp-refresh")
+                        .child(if loading { "检测中…" } else { "刷新" })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.start_detect(DetectKind::Mcp, cx);
+                        })),
+                ),
             )
+            .child(card_divider(pal))
             .children(mcps.iter().map(|m| {
                 let pkg_uninstall = m.package.clone();
                 let pkg_install = m.package.clone();
@@ -685,38 +609,30 @@ impl AiEnvironmentView {
                     .px_5()
                     .py_1p5()
                     .border_b_1()
-                    .border_color(theme.border)
+                    .border_color(pal.border)
                     .child(
                         div()
                             .size(px(6.0))
                             .rounded_full()
-                            .bg(if installed { theme.success } else { theme.text_muted }),
+                            .bg(if installed { pal.success } else { pal.text_muted }),
                     )
                     .child(
                         div()
                             .flex_1()
                             .text_size(px(12.5))
-                            .text_color(theme.text)
+                            .text_color(pal.text)
                             .child(m.name.clone()),
                     )
                     .child(
                         div()
                             .text_size(px(11.0))
-                            .text_color(theme.text_muted)
+                            .text_color(pal.text_muted)
                             .child(m.package.clone()),
                     )
                     .when(installed, |r| {
                         r.child(
-                            div()
+                            button_sm(pal, ButtonKind::Danger)
                                 .id("uninstall-mcp")
-                                .px_2()
-                                .py_0p5()
-                                .rounded_sm()
-                                .cursor_pointer()
-                                .bg(theme.panel_hover)
-                                .hover(|s| s.bg(rgb(0x7f1d1d)))
-                                .text_color(theme.text)
-                                .text_size(px(11.0))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if !disabled {
                                         this.run_mcp_action(McpAction::Uninstall(pkg_uninstall.clone()), cx);
@@ -727,16 +643,8 @@ impl AiEnvironmentView {
                     })
                     .when(!installed, |r| {
                         r.child(
-                            div()
+                            button_sm(pal, ButtonKind::Primary)
                                 .id("install-mcp")
-                                .px_2()
-                                .py_0p5()
-                                .rounded_sm()
-                                .cursor_pointer()
-                                .bg(theme.brand)
-                                .hover(|s| s.bg(rgb(0x3d66e6)))
-                                .text_color(rgb(0xffffff))
-                                .text_size(px(11.0))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if !disabled {
                                         this.run_mcp_action(McpAction::Install(pkg_install.clone()), cx);
@@ -747,57 +655,37 @@ impl AiEnvironmentView {
                     })
             }))
             .when(mcps.is_empty() && !loading, |s| {
-                s.child(crate::ui::table_empty(theme, "暂无 MCP 数据 — 点击「刷新」"))
+                s.child(table_empty(pal, "暂无 MCP 数据 — 点击「刷新」"))
             })
             .when(mcps.is_empty() && loading, |s| {
-                s.child(crate::ui::table_empty(theme, "检测中…"))
+                s.child(table_empty(pal, "检测中…"))
             })
     }
 
     fn ext_card(
         &self,
-        theme: &Theme,
+        pal: &Palette,
         extensions: &[AiExtension],
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let loading = self.ext_loading;
-        crate::ui::table_container(theme)
+        card(pal)
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px_5()
-                    .py_3()
-                    .child(
-                        div()
-                            .text_size(px(14.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child("Skills / 扩展"),
-                    )
-                    .child(
-                        div()
-                            .id("ext-refresh")
-                            .px_3()
-                            .py_1()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .bg(theme.panel_hover)
-                            .hover(|s| s.bg(theme.border))
-                            .text_color(theme.text)
-                            .text_size(px(11.5))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.start_detect(DetectKind::Ext, cx);
-                            }))
-                            .child(if loading { "扫描中…" } else { "刷新" }),
-                    ),
+                card_header(pal, "Skills / 扩展").child(
+                    button_sm(pal, ButtonKind::Secondary)
+                        .id("ext-refresh")
+                        .child(if loading { "扫描中…" } else { "刷新" })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.start_detect(DetectKind::Ext, cx);
+                        })),
+                ),
             )
+            .child(card_divider(pal))
             .when(extensions.is_empty() && !loading, |s| {
-                s.child(crate::ui::table_empty(theme, "未发现扩展（点击「刷新」扫描用户目录）"))
+                s.child(table_empty(pal, "未发现扩展（点击「刷新」扫描用户目录）"))
             })
             .when(extensions.is_empty() && loading, |s| {
-                s.child(crate::ui::table_empty(theme, "扫描中…"))
+                s.child(table_empty(pal, "扫描中…"))
             })
             .children(extensions.iter().take(12).map(|e| {
                 let tool = e.tool.clone();
@@ -810,7 +698,7 @@ impl AiEnvironmentView {
                     .px_5()
                     .py_1p5()
                     .border_b_1()
-                    .border_color(theme.border)
+                    .border_color(pal.border)
                     .child(
                         div()
                             .flex()
@@ -819,13 +707,13 @@ impl AiEnvironmentView {
                             .child(
                                 div()
                                     .text_size(px(12.0))
-                                    .text_color(theme.text)
+                                    .text_color(pal.text)
                                     .child(name),
                             )
                             .child(
                                 div()
                                     .text_size(px(10.5))
-                                    .text_color(theme.text_muted)
+                                    .text_color(pal.text_muted)
                                     .child(SharedString::from(format!("{}/{}", tool, kind))),
                             ),
                     )
@@ -833,7 +721,7 @@ impl AiEnvironmentView {
                         s.child(
                             div()
                                 .text_size(px(11.0))
-                                .text_color(theme.text_muted)
+                                .text_color(pal.text_muted)
                                 .child(desc),
                         )
                     })

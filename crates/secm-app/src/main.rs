@@ -11,7 +11,6 @@ mod icons;
 mod pages;
 mod pi_clone;
 mod single_instance;
-mod theme;
 mod tray;
 mod ui;
 mod win32;
@@ -69,6 +68,8 @@ fn main() {
         // 应用退出前清理 LHM sidecar（受控 HTTP 退出 + PID/映像名 taskkill 兜底，P1-3）。
         // on_app_quit 覆盖所有退出路径（托盘退出/系统关机）；detach 使订阅常驻不被注销。
         cx.on_app_quit(|_| async {
+            // 趋势历史落盘兜底（脏时立即写，保证趋势图跨重启恢复完整）
+            secm_core::sensor_history::flush();
             secm_core::lhm::shutdown();
         })
         .detach();

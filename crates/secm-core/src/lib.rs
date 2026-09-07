@@ -15,6 +15,7 @@ pub mod netif;
 pub mod network;
 pub mod proc_util;
 pub mod sensor;
+pub mod sensor_history;
 pub mod sensor_service;
 pub mod settings;
 pub mod sysinfo;

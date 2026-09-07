@@ -21,6 +21,10 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use windows_sys::Win32::NetworkManagement::IpHelper::{
+    GetExtendedTcpTable, MIB_TCPTABLE, MIB_TCP_STATE_ESTAB, TCP_TABLE_BASIC_ALL,
+};
+use windows_sys::Win32::Networking::WinSock::AF_INET;
 use windows_sys::Win32::System::Performance::{
     PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
     PdhOpenQueryW, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY,
@@ -218,6 +222,61 @@ pub fn get_net_io_speed_map() -> HashMap<String, (f32, f32)> {
             HashMap::new()
         }
     }
+}
+
+/// 统计当前活跃（ESTABLISHED）TCP 连接数（IPv4，GetExtendedTcpTable 全表统计）。
+///
+/// 「活跃 TCP 连接数」= 处于 MIB_TCP_STATE_ESTAB 状态的 IPv4 连接条目数
+/// （资源监视器「网络 → TCP 连接」同源语义）。失败时返回 0（轮询 UI 展示 0，
+/// 下一 tick 自动重试，不中断采样循环）。
+/// 同步阻塞微秒级；调用方须在后台线程执行（S8）。
+pub fn tcp_connection_count() -> u32 {
+    let mut size: u32 = 0;
+    // SAFETY: 首次探测缓冲大小（table 传 NULL，返回 ERROR_INSUFFICIENT_BUFFER 并填充 size）
+    let rc = unsafe {
+        GetExtendedTcpTable(
+            std::ptr::null_mut(),
+            &mut size,
+            0,
+            AF_INET as u32,
+            TCP_TABLE_BASIC_ALL,
+            0,
+        )
+    };
+    if rc == 0 || size == 0 {
+        return 0;
+    }
+    // u32 字对齐缓冲（MIB_TCPTABLE 含 u32 字段，u8 缓冲不保证对齐）
+    let words = (size as usize).div_ceil(4);
+    let mut buf: Vec<u32> = vec![0u32; words];
+    let mut out_size: u32 = (words * 4) as u32;
+    // SAFETY: buf 为 u32 对齐输出缓冲，容量以字节数传入；API 填充 MIB_TCPTABLE
+    let rc = unsafe {
+        GetExtendedTcpTable(
+            buf.as_mut_ptr() as *mut core::ffi::c_void,
+            &mut out_size,
+            0,
+            AF_INET as u32,
+            TCP_TABLE_BASIC_ALL,
+            0,
+        )
+    };
+    if rc != 0 {
+        return 0;
+    }
+    // SAFETY: API 已按 MIB_TCPTABLE 布局（repr(C)：dwNumEntries + table[]）填充
+    let table = unsafe { &*(buf.as_ptr() as *const MIB_TCPTABLE) };
+    let mut count = 0u32;
+    for i in 0..table.dwNumEntries {
+        // SAFETY: table 为 [MIB_TCPROW_LH; 1] 惯用技巧，按索引步进 < dwNumEntries
+        let row = unsafe { &*table.table.as_ptr().add(i as usize) };
+        // SAFETY: union 读取 dwState（与 State 变体同存储，布局等价）
+        let st = unsafe { row.Anonymous.dwState };
+        if st == MIB_TCP_STATE_ESTAB as u32 {
+            count += 1;
+        }
+    }
+    count
 }
 
 #[cfg(test)]

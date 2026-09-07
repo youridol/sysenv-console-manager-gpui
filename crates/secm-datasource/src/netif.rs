@@ -118,6 +118,56 @@ pub fn fmt_speed_bps(bps: u64) -> String {
 }
 
 // ============================================================================
+// P16 网卡累计字节 — GetIfTable2（趋势图/任意间隔速率的差分基线）
+// ============================================================================
+
+/// IF_TYPE_SOFTWARE_LOOPBACK（MIB_IF_ROW2.InterfaceType，回环接口类型码）
+const IF_TYPE_SOFTWARE_LOOPBACK: u32 = 24;
+
+/// 读取各接口累计收发字节数（接口别名 → (下行累计 InOctets, 上行累计 OutOctets)）。
+///
+/// 语义：GetIfTable2 MIB_IF_ROW2 的 64 位累计八位组计数（系统启动以来累计）。
+/// 与 `link_speeds()` 同源同键（Alias），调用方以两次快照的差值除以间隔即可自算
+/// 任意间隔的速率 —— PDH 速率计数器要求 ≥1s 采样间隔（见 net_io.rs 时序语义），
+/// 本接口无此限制，支持 0.5s 级高频轮询（硬件信息页网络流量卡使用）。
+/// 跳过回环接口与无别名接口；失败时返回空映射（S8 降级，调用方按键匹配不到即为 0）。
+pub fn if_bytes_map() -> HashMap<String, (u64, u64)> {
+    let mut table_ptr: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
+    // SAFETY: GetIfTable2 分配 MIB_IF_TABLE2（堆内存），成功时须 FreeMibTable 释放
+    let rc = unsafe { GetIfTable2(&mut table_ptr) };
+    if rc != 0 || table_ptr.is_null() {
+        return HashMap::new();
+    }
+
+    // SAFETY: 结构体头部为 NumEntries + Table 数组首元素，读取头部字段安全
+    let num_entries = unsafe { (*table_ptr).NumEntries };
+    // SAFETY: MIB_IF_ROW2 是固定大小结构，Table 是 [MIB_IF_ROW2; 1] 惯用技巧
+    let first = unsafe { (*table_ptr).Table.as_ptr() };
+
+    let mut map = HashMap::new();
+    for i in 0..num_entries {
+        // SAFETY: first 指向 Table[0]，i < NumEntries，步进在 GetIfTable2 分配范围内
+        let row = unsafe { &*first.add(i as usize) };
+        // 回环接口流量无业务意义且字节量巨大，剔除（MIB_IF_ROW2 的类型字段名为 Type）
+        if row.Type == IF_TYPE_SOFTWARE_LOOPBACK {
+            continue;
+        }
+        let alias = wide_array_to_string(&row.Alias);
+        if alias.is_empty() {
+            continue;
+        }
+        map.insert(alias, (row.InOctets, row.OutOctets));
+    }
+
+    // SAFETY: FreeMibTable 释放 GetIfTable2 分配的内存
+    unsafe {
+        FreeMibTable(table_ptr as _);
+    }
+
+    map
+}
+
+// ============================================================================
 // P4 本地 IP — GetAdaptersAddresses
 // ============================================================================
 

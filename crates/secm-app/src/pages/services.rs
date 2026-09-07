@@ -3,12 +3,19 @@
 //
 // 并发模型：服务枚举（数百服务，慢）后台线程执行；启停/启动类型为系统 API
 // 调用，后台执行 + 完成后延迟后台刷新状态。主线程仅渲染。
+//
+// 呈现层：统一接入 crate::ui::page 布局框架，色板取自 pi_clone::theme::Palette
+// （明暗双主题，随壳 set_appearance 联动），禁止硬编码业务色。
 
-use gpui::{div, px, rgb, Entity, SharedString, Window, Context, Render, WeakEntity};
+use gpui::{div, px, Entity, SharedString, Window, Context, Render, WeakEntity};
 use gpui::prelude::*;
 use secm_core::settings::{self, ServiceInfo};
 
-use crate::theme::Theme;
+use crate::pi_clone::theme::{Appearance, Palette};
+use crate::ui::page::{
+    banner, button_sm, card, page_header, page_root, status_pill, table_head, table_row,
+    BannerKind, ButtonKind, ColWidth,
+};
 use crate::ui::text_input::{ChangeText, TextField};
 
 pub struct ServicesView {
@@ -22,10 +29,14 @@ pub struct ServicesView {
     op_busy: bool,
     /// 搜索输入框（P2：历史为静态占位文案，搜索从未接线）
     search_input: Entity<TextField>,
+    /// 页面外观，随壳主题联动
+    appearance: Appearance,
+    /// 页面滚动状态（GPUI 0.2 滚轮需 track_scroll 手动驱动，见 ui::page::page_root）
+    page_scroll: gpui::ScrollHandle,
 }
 
 impl ServicesView {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(appearance: Appearance, cx: &mut Context<Self>) -> Self {
         let search_input = cx.new(|cx| TextField::new("", "搜索服务名/显示名", cx));
         cx.subscribe(
             &search_input,
@@ -41,10 +52,23 @@ impl ServicesView {
             loading: false,
             op_busy: false,
             search_input,
+            appearance,
+            page_scroll: gpui::ScrollHandle::new(),
         };
         log::info!("服务管理 · 页面已打开");
         v.start_load(cx);
         v
+    }
+
+    /// 当前页面色板（明暗随壳联动）
+    fn pal(&self) -> Palette {
+        Palette::for_appearance(self.appearance)
+    }
+
+    /// 壳切换主题时同步外观（PiShell::toggle_theme 联动调用）
+    pub(crate) fn set_appearance(&mut self, appearance: Appearance, cx: &mut Context<Self>) {
+        self.appearance = appearance;
+        cx.notify();
     }
 
     /// 后台枚举服务（数百项，慢；结果回填 UI）
@@ -179,11 +203,12 @@ impl ServicesView {
         .detach();
     }
 
-    fn status_color(status: &str, theme: &Theme) -> gpui::Rgba {
+    /// 状态点颜色（Running=成功绿 / Stopped=弱化文本 / 其他=警示黄）
+    fn status_color(status: &str, pal: &Palette) -> gpui::Rgba {
         match status {
-            "Running" => theme.success,
-            "Stopped" => theme.text_muted,
-            _ => theme.warn,
+            "Running" => pal.success,
+            "Stopped" => pal.text_muted,
+            _ => pal.warning,
         }
     }
 }
@@ -212,83 +237,51 @@ impl ServiceOp {
 
 impl Render for ServicesView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::dark();
+        let pal = self.pal();
         let services = self.filtered();
 
-        div()
-            .id("services-page-root")
-            .flex_col()
-            .size_full()
-            .p_6()
-            .gap_4()
-            // 内容超高时整页纵向滚动
-            .overflow_y_scroll()
-            // 页头 + 搜索
+        page_root(&pal, "services-page-root", &self.page_scroll, &cx.entity())
+            // 页头（标题+副标题）+ 右侧搜索框
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .flex()
-                            .items_baseline()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .text_size(px(24.0))
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(theme.text)
-                                    .child("服务管理"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .text_color(theme.text_muted)
-                                    .child(SharedString::from(format!(
-                                        "{} 个服务",
-                                        self.services.len()
-                                    ))),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(self.search_box(&theme, cx)),
-                    ),
+                page_header(
+                    &pal,
+                    "服务管理",
+                    format!("{} 个服务 · Windows 服务枚举", self.services.len()),
+                )
+                .child(self.search_box(&pal)),
             )
-            // 状态消息
+            // 状态消息（非空才显示）
             .when(!self.status.is_empty(), |s| {
                 let msg = self.status.clone();
-                s.child(
-                    div()
-                        .px_4()
-                        .py_2()
-                        .rounded_md()
-                        .bg(theme.panel_hover)
-                        .text_size(px(12.0))
-                        .text_color(theme.info)
-                        .child(msg),
-                )
+                s.child(banner(&pal, BannerKind::Info, msg))
             })
-            // 服务表
+            // 服务表（卡片内滚动容器）
             .child(
-                crate::ui::table_container(&theme).child(
+                card(&pal).child(
                     div()
                         .id("svc-scroll")
                         .flex_col()
                         .h(px(520.0))
                         .overflow_scroll()
-                        .child(crate::ui::table_head(&theme, &["状态", "服务名", "显示名", "启动类型", "操作"]))
-                        .children(services.iter().map(|s| self.service_row(&theme, s, cx))),
+                        .child(table_head(
+                            &pal,
+                            &[
+                                ("状态", ColWidth::Px(80.0)),
+                                ("服务名", ColWidth::Flex),
+                                ("显示名", ColWidth::Px(260.0)),
+                                ("启动类型", ColWidth::Px(90.0)),
+                                ("操作", ColWidth::Px(120.0)),
+                            ],
+                        ))
+                        .children(services.iter().map(|s| self.service_row(&pal, s, cx))),
                 ),
             )
     }
 }
 
 impl ServicesView {
-    fn search_box(&self, theme: &Theme, _cx: &mut Context<Self>) -> impl IntoElement {
+    /// 页头右侧搜索框（保留 search_input 实体与 🔍 结构）
+    fn search_box(&self, pal: &Palette) -> impl IntoElement {
         div()
             .id("svc-search")
             .flex()
@@ -296,14 +289,14 @@ impl ServicesView {
             .gap_2()
             .px_3()
             .py_1p5()
-            .rounded_md()
+            .rounded(px(8.0))
             .border_1()
-            .border_color(theme.border)
-            .bg(theme.panel)
+            .border_color(pal.border)
+            .bg(pal.bg_hover)
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(theme.text_muted)
+                    .text_color(pal.text_muted)
                     .child("🔍"),
             )
             // 真实输入框（P2：搜索功能接线）
@@ -314,9 +307,10 @@ impl ServicesView {
             )
     }
 
+    /// 单行服务数据（单元格列宽与表头完全一致：80/Flex/260/90/120）
     fn service_row(
         &self,
-        theme: &Theme,
+        pal: &Palette,
         s: &ServiceInfo,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -324,101 +318,75 @@ impl ServicesView {
         let status = s.status.clone();
         let display = s.display_name.clone();
         let start_type = s.start_type.clone();
-        let color = Self::status_color(&status, theme);
+        let color = Self::status_color(&status, pal);
 
-        div()
+        table_row(pal)
             .id(SharedString::from(format!("svc-{}", name.clone())))
-            .flex()
-            .items_center()
-            .gap_2()
-            .px_4()
-            .py_2()
-            .border_b_1()
-            .border_color(theme.border)
-            // 状态
+            // 状态（点色 + 彩色文本）
             .child(
                 div()
-                    .w(px(70.0))
                     .flex_none()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1p5()
-                            .child(div().size(px(6.0)).rounded_full().bg(color))
-                            .child(
-                                div()
-                                    .text_size(px(11.5))
-                                    .text_color(color)
-                                    .child(status.clone()),
-                            ),
-                    ),
+                    .w(px(80.0))
+                    .child(status_pill(pal, status.clone(), color)),
             )
-            // 名称（flex_1）
+            // 服务名（Flex 自适应）
             .child(
                 div()
                     .flex_1()
+                    .min_w(px(0.0))
                     .text_size(px(12.5))
-                    .text_color(theme.text)
+                    .text_color(pal.text)
                     .child(name.clone()),
             )
             // 显示名（固定宽）
             .child(
                 div()
+                    .flex_none()
                     .w(px(260.0))
                     .text_size(px(12.0))
-                    .text_color(theme.text_muted)
+                    .text_color(pal.text_muted)
                     .child(display),
             )
             // 启动类型
             .child(
                 div()
-                    .w(px(70.0))
                     .flex_none()
+                    .w(px(90.0))
                     .text_size(px(11.5))
-                    .text_color(theme.text_muted)
+                    .text_color(pal.text_muted)
                     .child(start_type),
             )
             // 操作按钮
             .child(
                 div()
-                    .w(px(150.0))
                     .flex_none()
+                    .w(px(120.0))
                     .flex()
                     .gap_1()
-                    .child(service_action_button(theme, "启动", name.clone(), ServiceOp::Start, cx))
-                    .child(service_action_button(theme, "停止", name.clone(), ServiceOp::Stop, cx)),
+                    .child(service_action_button(pal, "启动", name.clone(), ServiceOp::Start, cx))
+                    .child(service_action_button(pal, "停止", name.clone(), ServiceOp::Stop, cx)),
             )
     }
 }
 
-/// 操作按钮（Primary/Danger 样式，行内小按钮）
+/// 行内操作按钮（框架 button_sm：启动=次操作 / 停止=危险；id 组合规则保持原样）
 fn service_action_button(
-    theme: &Theme,
+    pal: &Palette,
     label: &str,
     svc: String,
     op: ServiceOp,
     cx: &mut Context<ServicesView>,
 ) -> impl IntoElement {
-    let (bg, hover_bg) = match op {
-        ServiceOp::Start | ServiceOp::ToggleAuto | ServiceOp::ToggleManual => {
-            (theme.panel_hover, theme.border)
-        }
-        _ => (theme.panel_hover, rgb(0x7f1d1d)),
+    // 启动类操作用次操作样式，停止类操作用危险样式（分组与原实现一致）
+    let kind = match op {
+        ServiceOp::Start | ServiceOp::ToggleAuto | ServiceOp::ToggleManual => ButtonKind::Secondary,
+        _ => ButtonKind::Danger,
     };
     let label_owned = label.to_string();
-    div()
+    button_sm(pal, kind)
         .id(SharedString::from(label_owned.clone() + &svc))
-        .px_2()
-        .py_0p5()
-        .rounded_sm()
-        .cursor_pointer()
-        .bg(bg)
-        .hover(|s| s.bg(hover_bg))
-        .text_size(px(11.0))
-        .text_color(theme.text)
+        .child(label_owned)
         .on_click(cx.listener(move |this, _, _, cx| {
             this.op_service(&svc, op, cx);
         }))
-        .child(label_owned)
 }

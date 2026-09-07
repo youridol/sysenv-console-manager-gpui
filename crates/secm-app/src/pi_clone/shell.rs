@@ -263,6 +263,38 @@ impl PiShell {
             Appearance::Dark => Appearance::Light,
         };
         log::info!("切换主题 → {}", if self.appearance == Appearance::Dark { "深色" } else { "浅色" });
+        // 主题联动：向全部已实例化页面实体同步外观（懒加载页由 ensure_page 取当前外观）
+        let appearance = self.appearance;
+        if let Some(e) = self.pages.dashboard.as_ref() {
+            e.update(cx, |v, c| v.set_appearance(appearance, c));
+        }
+        if let Some(e) = self.pages.settings.as_ref() {
+            e.update(cx, |v, c| v.set_appearance(appearance, c));
+        }
+        if let Some(e) = self.pages.services.as_ref() {
+            e.update(cx, |v, c| v.set_appearance(appearance, c));
+        }
+        if let Some(e) = self.pages.cleanup.as_ref() {
+            e.update(cx, |v, c| v.set_appearance(appearance, c));
+        }
+        if let Some(e) = self.pages.network.as_ref() {
+            e.update(cx, |v, c| v.set_appearance(appearance, c));
+        }
+        if let Some(e) = self.pages.net_config.as_ref() {
+            e.update(cx, |v, c| v.set_appearance(appearance, c));
+        }
+        if let Some(e) = self.pages.hardware.as_ref() {
+            e.update(cx, |v, c| v.set_appearance(appearance, c));
+        }
+        if let Some(e) = self.pages.environment.as_ref() {
+            e.update(cx, |v, c| v.set_appearance(appearance, c));
+        }
+        if let Some(e) = self.pages.ai_environment.as_ref() {
+            e.update(cx, |v, c| v.set_appearance(appearance, c));
+        }
+        if let Some(e) = self.pages.about.as_ref() {
+            e.update(cx, |v, c| v.set_appearance(appearance, c));
+        }
         cx.notify();
     }
 
@@ -393,56 +425,58 @@ impl PiShell {
     }
 
     fn ensure_page(&mut self, page: SecmPage, cx: &mut Context<Self>) {
+        // 懒构造页面实体：新页取当前外观；已存在页面的外观切换由 toggle_theme 联动
+        let appearance = self.appearance;
         match page {
             SecmPage::Dashboard => {
                 if self.pages.dashboard.is_none() {
                     let flag = self.pages.flag_for(page);
-                    self.pages.dashboard = Some(cx.new(|cx| DashboardView::new(flag, cx)));
+                    self.pages.dashboard = Some(cx.new(|cx| DashboardView::new(flag, appearance, cx)));
                 }
             }
             SecmPage::Settings => {
                 if self.pages.settings.is_none() {
-                    self.pages.settings = Some(cx.new(SettingsView::new));
+                    self.pages.settings = Some(cx.new(|cx| SettingsView::new(appearance, cx)));
                 }
             }
             SecmPage::Services => {
                 if self.pages.services.is_none() {
-                    self.pages.services = Some(cx.new(ServicesView::new));
+                    self.pages.services = Some(cx.new(|cx| ServicesView::new(appearance, cx)));
                 }
             }
             SecmPage::Cleanup => {
                 if self.pages.cleanup.is_none() {
-                    self.pages.cleanup = Some(cx.new(CleanupView::new));
+                    self.pages.cleanup = Some(cx.new(|cx| CleanupView::new(appearance, cx)));
                 }
             }
             SecmPage::Network => {
                 if self.pages.network.is_none() {
-                    self.pages.network = Some(cx.new(NetworkView::new));
+                    self.pages.network = Some(cx.new(|cx| NetworkView::new(appearance, cx)));
                 }
             }
             SecmPage::NetConfig => {
                 if self.pages.net_config.is_none() {
-                    self.pages.net_config = Some(cx.new(NetConfigView::new));
+                    self.pages.net_config = Some(cx.new(|cx| NetConfigView::new(appearance, cx)));
                 }
             }
             SecmPage::Hardware => {
                 if self.pages.hardware.is_none() {
-                    self.pages.hardware = Some(cx.new(HardwareView::new));
+                    self.pages.hardware = Some(cx.new(|cx| HardwareView::new(appearance, cx)));
                 }
             }
             SecmPage::Environment => {
                 if self.pages.environment.is_none() {
-                    self.pages.environment = Some(cx.new(EnvironmentView::new));
+                    self.pages.environment = Some(cx.new(|cx| EnvironmentView::new(appearance, cx)));
                 }
             }
             SecmPage::AiEnvironment => {
                 if self.pages.ai_environment.is_none() {
-                    self.pages.ai_environment = Some(cx.new(AiEnvironmentView::new));
+                    self.pages.ai_environment = Some(cx.new(|cx| AiEnvironmentView::new(appearance, cx)));
                 }
             }
             SecmPage::About => {
                 if self.pages.about.is_none() {
-                    self.pages.about = Some(cx.new(|_| AboutView::new()));
+                    self.pages.about = Some(cx.new(|_| AboutView::new(appearance)));
                 }
             }
         }
@@ -592,14 +626,14 @@ impl PiShell {
             .on_mouse_move(move |event: &gpui::MouseMoveEvent, _w, cx| {
                 let x = event.position.x.into();
                 let y: f32 = event.position.y.into();
-                let _ = drag_entity.update(cx, |t, _| {
+                let _ = drag_entity.update(cx, |t, cx| {
                     if t.sidebar_panel.resizing {
                         t.sidebar_drag_move(x, GrowDirection::Right);
                     } else if t.right_panel.resizing {
                         t.right_drag_move(x, GrowDirection::Left);
                     } else if let Some((start_py, start_ratio)) = t.log_sb_drag {
-                        // 日志流自绘滚动条 thumb 拖动
-                        t.log_sb_drag_move(y, start_py, start_ratio);
+                        // 日志流自绘滚动条 thumb 拖动（拖动中每帧 notify，见 log_sb_drag_move）
+                        t.log_sb_drag_move(y, start_py, start_ratio, cx);
                     }
                 });
             })
@@ -1046,22 +1080,33 @@ impl PiShell {
     /// 日志流自绘滚动条 thumb 拖动换算（shell 全局 move 回调）。
     /// start_py/start_ratio = 按下时记录的 (指针窗口 y, offset 占比)；
     /// 依据拖动位移更新 ScrollHandle offset。
-    fn log_sb_drag_move(&mut self, pointer_y: f32, start_py: f32, start_ratio: f32) {
+    fn log_sb_drag_move(
+        &mut self,
+        pointer_y: f32,
+        start_py: f32,
+        start_ratio: f32,
+        cx: &mut Context<Self>,
+    ) {
         let Some(handle) = self.log_scroll.clone() else {
             return;
         };
         let viewport = f32::from(handle.bounds().size.height);
+        // GPUI max_offset() 为 ≥0 的可滚动量（实测 probe 确认）；≤0 表示无溢出
         let max_off = f32::from(handle.max_offset().height);
-        if viewport <= 0.0 || max_off >= 0.0 {
+        let Some(new_off) = super::scroll_math::drag_to_offset(
+            viewport,
+            max_off,
+            start_py,
+            start_ratio,
+            pointer_y,
+        ) else {
             return;
-        }
-        let content = viewport + max_off.abs();
-        let thumb_h = (viewport * (viewport / content)).clamp(24.0, viewport);
-        let track = viewport;
-        let dy = pointer_y - start_py;
-        let ratio = (start_ratio + dy / (track - thumb_h).max(1.0)).clamp(0.0, 1.0);
-        let new_off = -(ratio * max_off.abs());
+        };
         handle.set_offset(gpui::point(gpui::px(0.0), gpui::px(new_off)));
+        // 关键：set_offset 只改 ScrollHandle 内存态；GPUI 普通 MouseMove 不会自动
+        // 重绘（仅系统级 active_drag 才 refresh）——不 notify 则 thumb/日志停留原地，
+        // 表现为"按住拉动无反应"。拖动每帧都 notify 触发重绘，offset 才生效上屏。
+        cx.notify();
     }
 
     /// 日志流滚动条 thumb 按下：记录起点供全局 move 换算（ratio = 当前 offset 占比）
@@ -1070,11 +1115,8 @@ impl PiShell {
             Some(handle) => {
                 let viewport = f32::from(handle.bounds().size.height);
                 let max_off = f32::from(handle.max_offset().height);
-                if viewport > 0.0 && max_off < 0.0 {
-                    (-f32::from(handle.offset().y)) / max_off.abs()
-                } else {
-                    0.0
-                }
+                let offset_y = f32::from(handle.offset().y);
+                super::scroll_math::offset_ratio(viewport, max_off, offset_y)
             }
             None => 0.0,
         };
@@ -1082,18 +1124,29 @@ impl PiShell {
     }
 
     fn render_main(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 显式高度链（v2.8.5 日志面板同款模式）：main 自身 h_full + relative（definite
+        // 高度），topbar 留在流内，页面挂载到 top(TOP_BAR_HEIGHT) 起的 absolute 区。
+        // ⚠ 两点教训（均已实证）：
+        //   1) flex_1 包装层直接装载页面 —— taffy min-content 撑爆 → 滚动容器高度=内容
+        //      全高、max_offset 恒 0、无法滚动（v2.10.1 前的滚动 BUG 根因）；
+        //   2) flex_1 包装层内嵌套 absolute inset-0 装载页面 —— taffy 对该形态的
+        //      inset 解析失败 → 页面零尺寸、主区全空（v2.10.1 的回归 BUG）。
+        //   唯 log-panel 模式（definite 父级 + absolute 定界）经真机验证双通过。
         div()
             .flex_1()
             .flex_col()
             .min_w(px(0.0))
             .h_full()
+            .relative()
             .overflow_hidden()
             .child(self.render_top_bar(window, cx))
             .child(
                 div()
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .overflow_hidden()
+                    .absolute()
+                    .top(px(layout::TOP_BAR_HEIGHT))
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
                     .child(self.current_page_view()),
             )
     }

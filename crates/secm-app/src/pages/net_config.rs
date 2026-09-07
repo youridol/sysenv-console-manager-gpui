@@ -1,16 +1,25 @@
 // secm-app::pages::net_config — 网络配置页（Phase 4）
 // 适配器枚举 + 当前配置展示 + 常见修改（DHCP/IPv4/DNS/MAC，netsh 后台执行）。
 // 修改类操作需管理员权限：命令层 is_admin 门禁返回中文错误。
+// 渲染层统一走 crate::ui::page 布局框架，色板取 pi_clone::theme::Palette（明暗随壳联动）。
 
 use gpui::prelude::*;
-use gpui::{div, px, rgb, SharedString, Window, Context, Render, Entity, WeakEntity};
+use gpui::{div, px, SharedString, Window, Context, Render, Entity, WeakEntity};
 use secm_core::netif::{self, AdapterConfig};
 use secm_core::net_config::{self, ApplyStep};
 
-use crate::theme::Theme;
+use crate::pi_clone::theme::{Appearance, Palette};
+use crate::ui::page::{
+    banner, button, card, card_body, card_divider, card_header, field_label, kv_row_w, page_header,
+    page_root, status_pill, BannerKind, ButtonKind,
+};
 use crate::ui::text_input::{TextField, ChangeText};
 
 pub struct NetConfigView {
+    /// 页面外观，随壳主题联动
+    appearance: Appearance,
+    /// 页面滚动状态（GPUI 0.2 滚轮需 track_scroll 手动驱动，见 ui::page::page_root）
+    page_scroll: gpui::ScrollHandle,
     adapters: Vec<AdapterConfig>,
     /// 当前选中的接口名
     selected: Option<String>,
@@ -35,7 +44,7 @@ pub struct NetConfigView {
 }
 
 impl NetConfigView {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(appearance: Appearance, cx: &mut Context<Self>) -> Self {
         let mac_input = cx.new(|cx| TextField::new("", "AA:BB:CC:DD:EE:FF", cx));
         let dns_input = cx.new(|cx| TextField::new("", "8.8.8.8, 114.114.114.114（逗号分隔）", cx));
         let ipv4_input = cx.new(|cx| TextField::new("", "192.168.1.100", cx));
@@ -61,6 +70,8 @@ impl NetConfigView {
         }
 
         let mut v = Self {
+            appearance,
+            page_scroll: gpui::ScrollHandle::new(),
             adapters: Vec::new(),
             selected: None,
             steps: Vec::new(),
@@ -403,128 +414,73 @@ impl NetConfigView {
         .detach();
     }
 
-    /// 基本信息行（label/value 对）
-    fn kv(&self, theme: &Theme, label: &str, value: &str) -> impl IntoElement {
-        div()
-            .flex()
-            .items_center()
-            .gap_3()
-            .child(
-                div()
-                    .w(px(110.0))
-                    .flex_none()
-                    .text_size(px(12.0))
-                    .text_color(theme.text_muted)
-                    .child(label.to_string()),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .text_size(px(12.5))
-                    .text_color(theme.text)
-                    .child(if value.is_empty() { "—".to_string() } else { value.to_string() }),
-            )
+    /// 当前页面色板（明暗随壳联动）
+    fn pal(&self) -> Palette {
+        Palette::for_appearance(self.appearance)
     }
 
-    /// 操作区标题
-    fn section(&self, theme: &Theme, title: impl Into<SharedString>) -> impl IntoElement {
-        crate::ui::section_title(theme, title)
+    /// 壳切换主题时同步外观（PiShell::toggle_theme 联动调用）
+    pub(crate) fn set_appearance(&mut self, appearance: Appearance, cx: &mut Context<Self>) {
+        self.appearance = appearance;
+        cx.notify();
+    }
+
+    /// 基本信息行（label/value 对，空值显示占位符；统一走框架 kv_row_w，转自有值规避 'static 约束）
+    fn kv(&self, pal: &Palette, label: &str, value: &str) -> impl IntoElement {
+        kv_row_w(
+            pal,
+            110.0,
+            label.to_string(),
+            if value.is_empty() { "—".to_string() } else { value.to_string() },
+        )
     }
 }
 
 impl Render for NetConfigView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::dark();
+        let pal = self.pal();
         let admin = self.admin;
         let selected_adapter = self.selected_adapter().cloned();
         let steps: Vec<ApplyStep> = self.steps.clone();
         let status_msg = self.status.clone();
 
-        div()
-            .id("net_config-page-root")
-            .flex_col()
-            .size_full()
-            .p_6()
-            .gap_4()
-            // 内容超高时整页纵向滚动
-            .overflow_y_scroll()
-            // 页头
+        // 页面根容器 + 页头（右侧权限状态）+ 状态横幅 + 各功能卡
+        page_root(&pal, "net_config-page-root", &self.page_scroll, &cx.entity())
+            // 页头：标题/副标题 + 管理员权限状态徽标
             .child(
-                div()
-                    .flex()
-                    .items_baseline()
-                    .justify_between()
-                    .child(
-                        div()
-                            .flex()
-                            .items_baseline()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .text_size(px(24.0))
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(theme.text)
-                                    .child("网络配置"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .text_color(theme.text_muted)
-                                    .child("适配器配置 · DHCP/静态切换 · MAC"),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(div().size(px(7.0)).rounded_full().bg(if admin { theme.success } else { theme.warn }))
-                            .child(
-                                div()
-                                    .text_size(px(11.5))
-                                    .text_color(if admin { theme.success } else { theme.warn })
-                                    .child(if admin { "管理员权限" } else { "普通权限（修改需管理员）" }),
-                            ),
-                    ),
+                page_header(&pal, "网络配置", "适配器配置 · DHCP/静态切换 · MAC").child(status_pill(
+                    &pal,
+                    if admin {
+                        "管理员权限"
+                    } else {
+                        "普通权限（修改需管理员）"
+                    },
+                    if admin { pal.success } else { pal.warning },
+                )),
             )
             // 错误/状态消息
             .when(!status_msg.is_empty(), |s| {
                 let msg = status_msg.clone();
-                s.child(
-                    div()
-                        .px_4()
-                        .py_2()
-                        .rounded_md()
-                        .bg(theme.panel_hover)
-                        .text_size(px(12.0))
-                        .text_color(theme.info)
-                        .child(msg),
-                )
+                s.child(banner(&pal, BannerKind::Info, msg))
             })
             // 适配器选择 + 当前配置
-            .child(self.adapter_panel(&theme, cx))
+            .child(self.adapter_panel(&pal, cx))
             // 修改操作
-            .when(selected_adapter.is_some(), |s| s.child(self.action_panel(&theme, cx)))
+            .when(selected_adapter.is_some(), |s| s.child(self.action_panel(&pal, cx)))
             // 步骤结果
-            .when(!steps.is_empty(), |s| s.child(self.steps_panel(&theme, &steps)))
+            .when(!steps.is_empty(), |s| s.child(self.steps_panel(&pal, &steps)))
     }
 }
 
 impl NetConfigView {
-    fn adapter_panel(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    /// 适配器卡：卡片头 + 分隔线 + 滚动列表（行结构保留，仅色板化）
+    fn adapter_panel(&self, pal: &Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let adapters: Vec<AdapterConfig> = self.adapters.clone();
         let selected = self.selected.clone();
 
-        crate::ui::table_container(theme)
-            .child(
-                div()
-                    .px_4()
-                    .py_2()
-                    .text_size(px(13.5))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child("网络适配器"),
-            )
+        card(pal)
+            .child(card_header(pal, "网络适配器"))
+            .child(card_divider(pal))
             .child(
                 div()
                     .id("nc-adapter-scroll")
@@ -547,9 +503,9 @@ impl NetConfigView {
                                 .px_4()
                                 .py_2()
                                 .cursor_pointer()
-                                .when(is_sel, |s| s.bg(theme.panel_hover))
+                                .when(is_sel, |s| s.bg(pal.bg_hover))
                                 .border_b_1()
-                                .border_color(theme.border)
+                                .border_color(pal.border)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.select_adapter(&name_click, cx);
                                 }))
@@ -562,26 +518,26 @@ impl NetConfigView {
                                             div()
                                                 .size(px(6.0))
                                                 .rounded_full()
-                                                .bg(if status == "Up" { theme.success } else { theme.text_muted }),
+                                                .bg(if status == "Up" { pal.success } else { pal.text_muted }),
                                         )
                                         .child(
                                             div()
                                                 .flex_1()
                                                 .text_size(px(13.0))
-                                                .text_color(if is_sel { theme.brand } else { theme.text })
+                                                .text_color(if is_sel { pal.accent } else { pal.text })
                                                 .child(name),
                                         )
                                         .child(
                                             div()
                                                 .text_size(px(11.0))
-                                                .text_color(if status == "Up" { theme.success } else { theme.text_muted })
+                                                .text_color(if status == "Up" { pal.success } else { pal.text_muted })
                                                 .child(if status == "Up" { "已连接" } else { "已断开" }),
                                         ),
                                 )
                                 .child(
                                     div()
                                         .text_size(px(11.0))
-                                        .text_color(theme.text_muted)
+                                        .text_color(pal.text_muted)
                                         .child(SharedString::from(desc)),
                                 )
                                 .when(has_ips, |s| {
@@ -589,7 +545,7 @@ impl NetConfigView {
                                     s.child(
                                         div()
                                             .text_size(px(11.0))
-                                            .text_color(theme.text_muted)
+                                            .text_color(pal.text_muted)
                                             .child(SharedString::from(format!("IP {} · MAC {}", ip, mac))),
                                     )
                                 })
@@ -598,7 +554,8 @@ impl NetConfigView {
             )
     }
 
-    fn action_panel(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    /// 修改操作区：当前配置 / IPv4 / IPv6 / MAC 四张卡
+    fn action_panel(&self, pal: &Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(a) = self.selected_adapter() else {
             return div().into_any_element();
         };
@@ -606,276 +563,176 @@ impl NetConfigView {
 
         let mut panel = div().flex_col().gap_4();
 
-        // 当前配置区
+        // 当前配置卡：键值信息行列表
         let ipv4s = adapter.ipv4.join(", ");
         let dns4 = adapter.ipv4_dns.join(", ");
         let ipv6 = adapter.ipv6_link_local.join(", ");
         let mac = adapter.mac.clone().unwrap_or_else(|| "—".to_string());
         panel = panel.child(
-            div()
-                .flex_col()
-                .p_4()
-                .gap_2()
-                .rounded_md()
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.panel)
-                .child(self.section(theme, "当前配置"))
-                .child(self.kv(theme, "接口名", &adapter.name))
-                .child(self.kv(theme, "描述", &adapter.description))
-                .child(self.kv(theme, "MAC 地址", &mac))
-                .child(self.kv(theme, "IPv4", &ipv4s))
-                .child(self.kv(theme, "IPv4 DNS", &dns4))
-                .child(self.kv(theme, "IPv6 链路本地", &ipv6)),
+            card(pal)
+                .child(card_header(pal, "当前配置"))
+                .child(card_divider(pal))
+                .child(
+                    card_body(pal)
+                        .child(self.kv(pal, "接口名", &adapter.name))
+                        .child(self.kv(pal, "描述", &adapter.description))
+                        .child(self.kv(pal, "MAC 地址", &mac))
+                        .child(self.kv(pal, "IPv4", &ipv4s))
+                        .child(self.kv(pal, "IPv4 DNS", &dns4))
+                        .child(self.kv(pal, "IPv6 链路本地", &ipv6)),
+                ),
         );
 
-        // IPv4 设置区
+        // IPv4 设置卡：DHCP/刷新按钮 + 地址/掩码/网关/DNS 输入 + 应用按钮
         panel = panel.child(
-            div()
-                .flex_col()
-                .p_4()
-                .gap_3()
-                .rounded_md()
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.panel)
-                .child(self.section(theme, "IPv4 设置"))
+            card(pal)
+                .child(card_header(pal, "IPv4 设置"))
+                .child(card_divider(pal))
                 .child(
-                    div()
-                        .flex()
-                        .gap_2()
+                    card_body(pal)
                         .child(
                             div()
-                                .id("nc-dhcp")
-                                .px_4()
-                                .py_1p5()
-                                .rounded_md()
-                                .cursor_pointer()
-                                .bg(theme.brand)
-                                .hover(|s| s.bg(rgb(0x3d66e6)))
-                                .text_color(rgb(0xffffff))
-                                .text_size(px(12.5))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.set_dhcp(cx);
-                                }))
-                                .child("切换为 DHCP（自动获取）"),
+                                .flex()
+                                .gap_2()
+                                .child(
+                                    button(pal, ButtonKind::Primary)
+                                        .id("nc-dhcp")
+                                        .child("切换为 DHCP（自动获取）")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.set_dhcp(cx);
+                                        })),
+                                )
+                                .child(
+                                    button(pal, ButtonKind::Secondary)
+                                        .id("nc-refresh")
+                                        .child("刷新配置")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.refresh(cx);
+                                        })),
+                                ),
                         )
                         .child(
                             div()
-                                .id("nc-refresh")
-                                .px_4()
-                                .py_1p5()
-                                .rounded_md()
-                                .cursor_pointer()
-                                .bg(theme.panel_hover)
-                                .hover(|s| s.bg(theme.border))
-                                .text_color(theme.text)
-                                .text_size(px(12.5))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.refresh(cx);
-                                }))
-                                .child("刷新配置"),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .child(
-                            div()
-                                .flex_col()
-                                .flex_1()
-                                .gap_1()
+                                .flex()
+                                .gap_2()
                                 .child(
                                     div()
-                                        .text_size(px(11.0))
-                                        .text_color(theme.text_muted)
-                                        .child("IP 地址"),
+                                        .flex_col()
+                                        .flex_1()
+                                        .gap_1()
+                                        .child(field_label(pal, "IP 地址"))
+                                        .child(self.ipv4_input.clone()),
                                 )
-                                .child(self.ipv4_input.clone()),
+                                .child(
+                                    div()
+                                        .flex_col()
+                                        .flex_1()
+                                        .gap_1()
+                                        .child(field_label(pal, "子网掩码"))
+                                        .child(self.mask_input.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .flex_col()
+                                        .flex_1()
+                                        .gap_1()
+                                        .child(field_label(pal, "默认网关（可选）"))
+                                        .child(self.gateway_input.clone()),
+                                ),
                         )
                         .child(
                             div()
                                 .flex_col()
-                                .flex_1()
                                 .gap_1()
-                                .child(
-                                    div()
-                                        .text_size(px(11.0))
-                                        .text_color(theme.text_muted)
-                                        .child("子网掩码"),
-                                )
-                                .child(self.mask_input.clone()),
+                                .child(field_label(pal, "DNS 服务器（逗号分隔；留空=DHCP）"))
+                                .child(self.dns_input.clone()),
                         )
                         .child(
-                            div()
-                                .flex_col()
-                                .flex_1()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_size(px(11.0))
-                                        .text_color(theme.text_muted)
-                                        .child("默认网关（可选）"),
-                                )
-                                .child(self.gateway_input.clone()),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(theme.text_muted)
-                                .child("DNS 服务器（逗号分隔；留空=DHCP）"),
-                        )
-                        .child(self.dns_input.clone()),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .child(
-                            div()
-                                .id("nc-static-v4")
-                                .px_4()
-                                .py_1p5()
-                                .rounded_md()
-                                .cursor_pointer()
-                                .bg(theme.panel_hover)
-                                .border_1()
-                                .border_color(theme.border)
-                                .hover(|s| s.bg(theme.border))
-                                .text_color(theme.text)
-                                .text_size(px(12.5))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.apply_static_v4(cx);
-                                }))
-                                .child("应用静态 IPv4 + DNS"),
+                            div().flex().justify_end().child(
+                                button(pal, ButtonKind::Secondary)
+                                    .id("nc-static-v4")
+                                    .child("应用静态 IPv4 + DNS")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.apply_static_v4(cx);
+                                    })),
+                            ),
                         ),
                 ),
         );
 
-        // IPv6 设置区
+        // IPv6 设置卡：地址/网关输入 + 应用按钮
         panel = panel.child(
-            div()
-                .flex_col()
-                .p_4()
-                .gap_3()
-                .rounded_md()
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.panel)
-                .child(self.section(theme, "IPv6 设置（静态地址/网关）"))
+            card(pal)
+                .child(card_header(pal, "IPv6 设置（静态地址/网关）"))
+                .child(card_divider(pal))
                 .child(
-                    div()
-                        .flex()
-                        .gap_2()
+                    card_body(pal)
                         .child(
                             div()
-                                .flex_col()
-                                .flex_1()
-                                .gap_1()
+                                .flex()
+                                .gap_2()
                                 .child(
                                     div()
-                                        .text_size(px(11.0))
-                                        .text_color(theme.text_muted)
-                                        .child("IPv6 地址（可选）"),
+                                        .flex_col()
+                                        .flex_1()
+                                        .gap_1()
+                                        .child(field_label(pal, "IPv6 地址（可选）"))
+                                        .child(self.ipv6_input.clone()),
                                 )
-                                .child(self.ipv6_input.clone()),
+                                .child(
+                                    div()
+                                        .flex_col()
+                                        .flex_1()
+                                        .gap_1()
+                                        .child(field_label(pal, "IPv6 网关（可选）"))
+                                        .child(self.ipv6_gw_input.clone()),
+                                ),
                         )
                         .child(
-                            div()
-                                .flex_col()
-                                .flex_1()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_size(px(11.0))
-                                        .text_color(theme.text_muted)
-                                        .child("IPv6 网关（可选）"),
-                                )
-                                .child(self.ipv6_gw_input.clone()),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .child(
-                            div()
-                                .id("nc-static-v6")
-                                .px_4()
-                                .py_1p5()
-                                .rounded_md()
-                                .cursor_pointer()
-                                .bg(theme.panel_hover)
-                                .border_1()
-                                .border_color(theme.border)
-                                .hover(|s| s.bg(theme.border))
-                                .text_color(theme.text)
-                                .text_size(px(12.5))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.apply_static_v6(cx);
-                                }))
-                                .child("应用静态 IPv6"),
+                            div().flex().justify_end().child(
+                                button(pal, ButtonKind::Secondary)
+                                    .id("nc-static-v6")
+                                    .child("应用静态 IPv6")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.apply_static_v6(cx);
+                                    })),
+                            ),
                         ),
                 ),
         );
 
-        // MAC 设置区
+        // MAC 设置卡：新 MAC 输入 + 危险操作按钮
         let mac = adapter.mac.clone().unwrap_or_default();
         panel = panel.child(
-            div()
-                .flex_col()
-                .p_4()
-                .gap_3()
-                .rounded_md()
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.panel)
-                .child(self.section(theme, "MAC 地址修改（高级）"))
+            card(pal)
+                .child(card_header(pal, "MAC 地址修改（高级）"))
+                .child(card_divider(pal))
                 .child(
-                    div()
-                        .flex_col()
-                        .gap_1()
+                    card_body(pal)
                         .child(
                             div()
-                                .text_size(px(11.0))
-                                .text_color(theme.text_muted)
-                                .child("新 MAC（AA:BB:CC:DD:EE:FF）"),
+                                .flex_col()
+                                .gap_1()
+                                .child(field_label(pal, "新 MAC（AA:BB:CC:DD:EE:FF）"))
+                                .child(self.mac_input.clone()),
                         )
-                        .child(self.mac_input.clone()),
-                )
-                .when(!mac.is_empty(), |s| {
-                    s.child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(format!("当前：{}（修改后网卡将短暂重启）", mac))),
-                    )
-                })
-                .child(
-                    div()
-                        .flex()
-                        .justify_end()
+                        .when(!mac.is_empty(), |s| {
+                            s.child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(pal.text_muted)
+                                    .child(SharedString::from(format!("当前：{}（修改后网卡将短暂重启）", mac))),
+                            )
+                        })
                         .child(
-                            div()
-                                .id("nc-mac")
-                                .px_4()
-                                .py_1p5()
-                                .rounded_md()
-                                .cursor_pointer()
-                                .bg(rgb(0x7f1d1d))
-                                .hover(|s| s.bg(rgb(0x991b1b)))
-                                .text_color(rgb(0xfecaca))
-                                .text_size(px(12.5))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.apply_mac(cx);
-                                }))
-                                .child("修改 MAC"),
+                            div().flex().justify_end().child(
+                                button(pal, ButtonKind::Danger)
+                                    .id("nc-mac")
+                                    .child("修改 MAC")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.apply_mac(cx);
+                                    })),
+                            ),
                         ),
                 ),
         );
@@ -883,17 +740,11 @@ impl NetConfigView {
         panel.into_any_element()
     }
 
-    fn steps_panel(&self, theme: &Theme, steps: &[ApplyStep]) -> impl IntoElement {
-        crate::ui::table_container(theme)
-            .child(
-                div()
-                    .px_4()
-                    .py_2()
-                    .text_size(px(13.5))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child("执行结果"),
-            )
+    /// 步骤结果卡：逐行展示 netsh 应用结果（✓/✗ 行结构保留，仅色板化）
+    fn steps_panel(&self, pal: &Palette, steps: &[ApplyStep]) -> impl IntoElement {
+        card(pal)
+            .child(card_header(pal, "执行结果"))
+            .child(card_divider(pal))
             .children(steps.iter().map(|s| {
                 let name = s.name.clone();
                 let msg = s.message.clone();
@@ -904,12 +755,12 @@ impl NetConfigView {
                     .px_4()
                     .py_1p5()
                     .border_b_1()
-                    .border_color(theme.border)
+                    .border_color(pal.border)
                     .child(
                         div()
                             .flex_1()
                             .text_size(px(12.5))
-                            .text_color(theme.text)
+                            .text_color(pal.text)
                             .child(name),
                     )
                     .child(
@@ -920,14 +771,14 @@ impl NetConfigView {
                             .child(
                                 div()
                                     .text_size(px(12.0))
-                                    .text_color(if s.ok { theme.success } else { theme.danger })
+                                    .text_color(if s.ok { pal.success } else { pal.danger })
                                     .child(if s.ok { "✓ 成功" } else { "✗ 失败" }),
                             )
                             .when(!msg.is_empty() && !s.ok, |r| {
                                 r.child(
                                     div()
                                         .text_size(px(11.5))
-                                        .text_color(theme.text_muted)
+                                        .text_color(pal.text_muted)
                                         .child(msg),
                                 )
                             }),

@@ -13,6 +13,7 @@ pub mod layout;
 pub mod nav;
 pub mod panel;
 pub mod right_panel;
+pub mod scroll_math;
 pub mod shell;
 pub mod sidebar;
 pub mod theme;

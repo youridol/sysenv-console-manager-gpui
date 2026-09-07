@@ -2,10 +2,14 @@
 // 网站可达性 / TCP 端口 / DNS 解析：阻塞网络 IO 放 BackgroundExecutor，完成后回 UI 更新。
 
 use gpui::prelude::*;
-use gpui::{div, px, rgb, SharedString, Window, Context, Render};
+use gpui::{div, px, SharedString, Window, Context, Render};
 use secm_core::network as net;
 
-use crate::theme::Theme;
+use crate::pi_clone::theme::{Appearance, Palette};
+use crate::ui::page::{
+    button, card, card_divider, card_header, page_header, page_root, table_empty, table_row,
+    ButtonKind,
+};
 
 /// 单行诊断结果
 #[derive(Clone)]
@@ -21,10 +25,14 @@ pub struct NetworkView {
     site_rows: Vec<DiagRow>,
     port_rows: Vec<DiagRow>,
     dns_rows: Vec<DiagRow>,
+    /// 页面外观，随壳主题联动
+    appearance: Appearance,
+    /// 页面滚动状态（GPUI 0.2 滚轮需 track_scroll 手动驱动，见 ui::page::page_root）
+    page_scroll: gpui::ScrollHandle,
 }
 
 impl NetworkView {
-    pub fn new(_cx: &mut Context<Self>) -> Self {
+    pub fn new(appearance: Appearance, _cx: &mut Context<Self>) -> Self {
         log::info!("网络诊断 · 页面已打开");
         Self {
             running: false,
@@ -32,7 +40,20 @@ impl NetworkView {
             site_rows: Vec::new(),
             port_rows: Vec::new(),
             dns_rows: Vec::new(),
+            appearance,
+            page_scroll: gpui::ScrollHandle::new(),
         }
+    }
+
+    /// 当前页面色板（明暗随壳联动）
+    fn pal(&self) -> Palette {
+        Palette::for_appearance(self.appearance)
+    }
+
+    /// 壳切换主题时同步外观（PiShell::toggle_theme 联动调用）
+    pub(crate) fn set_appearance(&mut self, appearance: Appearance, cx: &mut Context<Self>) {
+        self.appearance = appearance;
+        cx.notify();
     }
 
     /// 开始全量诊断：后台线程并行执行三组探测，完成回 UI 一次更新
@@ -181,120 +202,102 @@ impl NetworkView {
     }
 
     /// 结果行列表（三张卡片共用渲染）
-    fn rows(&self, theme: &Theme, rows: &[DiagRow]) -> impl IntoElement {
-        div()
-            .children(rows.iter().map(|r| {
-                let name = r.name.clone();
-                let detail = r.detail.clone();
-                div()
-                    .id(SharedString::from(format!("net-row-{}", name)))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px_4()
-                    .py_1p5()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(12.5))
-                            .text_color(theme.text)
-                            .child(name),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(div().size(px(6.0)).rounded_full().bg(if r.ok { theme.success } else { theme.danger }))
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .text_color(if r.ok { rgb(0x9be8b4) } else { theme.danger })
-                                    .child(detail),
-                            ),
-                    )
-            }))
+    fn rows(&self, pal: &Palette, rows: &[DiagRow]) -> impl IntoElement {
+        div().children(rows.iter().map(|r| {
+            let name = r.name.clone();
+            let detail = r.detail.clone();
+            // 行骨架（统一 table_row）+ 行 id 保留，名称列 Flex，右侧为详情组（状态圆点 + 结果文本）
+            table_row(pal)
+                .id(SharedString::from(format!("net-row-{}", name)))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(12.5))
+                        .text_color(pal.text)
+                        .child(name),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .size(px(6.0))
+                                .rounded_full()
+                                .bg(if r.ok { pal.success } else { pal.danger }),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(if r.ok { pal.success } else { pal.danger })
+                                .child(detail),
+                        ),
+                )
+        }))
     }
 }
 
 impl Render for NetworkView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::dark();
+        let pal = self.pal();
         let running = self.running;
 
-        div()
-            .id("network-page-root")
-            .flex_col()
-            .size_full()
-            .p_6()
-            .gap_4()
-            // 内容超高时整页纵向滚动
-            .overflow_y_scroll()
-            // 页头
-            .child(crate::ui::page_header(
-                &theme,
-                "网络诊断",
-                "网站可达性 · TCP 端口 · DNS 解析（阻塞探测在后台线程执行）",
-            ))
-            // 操作行：运行按钮 + 状态
+        page_root(&pal, "network-page-root", &self.page_scroll, &cx.entity())
+            // 页头：左侧标题/副标题，右侧动作区（运行按钮 + 状态文本）
+            .child(page_header(&pal, "网络诊断", "网站可达性 · TCP 端口 · DNS 解析"))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_3()
                     .child(
-                        div()
-                            .id("net-run")
-                            .px_4()
-                            .py_1p5()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .when(running, |s| s.bg(theme.panel_hover).text_color(theme.text_muted))
-                            .when(!running, |s| {
-                                s.bg(theme.brand)
-                                    .hover(|s| s.bg(rgb(0x3d66e6)))
-                                    .text_color(rgb(0xffffff))
-                            })
-                            .text_size(px(13.0))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.run_diagnostics(cx);
-                            }))
-                            .child(if running { "诊断中…" } else { "运行诊断" }),
+                        // 运行按钮：诊断中降级为 Secondary 提示忙碌；重复点击由
+                        // run_diagnostics 内 if self.running 守卫拦截（禁点逻辑不变）
+                        if running {
+                            button(&pal, ButtonKind::Secondary)
+                        } else {
+                            button(&pal, ButtonKind::Primary)
+                        }
+                        .id("net-run")
+                        .child(if running { "诊断中…" } else { "运行诊断" })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.run_diagnostics(cx);
+                        })),
                     )
                     .child(
                         div()
                             .text_size(px(12.0))
-                            .text_color(if running { theme.info } else { theme.text_muted })
+                            .text_color(if running { pal.accent } else { pal.text_muted })
                             .child(self.status.clone()),
                     ),
             )
             // 三组结果卡
-            .child(self.diag_card(&theme, "网站可达性", &self.site_rows))
-            .child(self.diag_card(&theme, "端口连通性（目标：www.baidu.com）", &self.port_rows))
-            .child(self.diag_card(&theme, "DNS 解析", &self.dns_rows))
+            .child(self.diag_card(&pal, "网站可达性", &self.site_rows))
+            .child(self.diag_card(&pal, "端口连通性（目标：www.baidu.com）", &self.port_rows))
+            .child(self.diag_card(&pal, "DNS 解析", &self.dns_rows))
     }
 }
 
 impl NetworkView {
-    fn diag_card(&self, theme: &Theme, title: &str, rows: &[DiagRow]) -> impl IntoElement {
-        crate::ui::table_container(theme)
-            .child(
-                div()
-                    .px_4()
-                    .py_2()
-                    .text_size(px(13.5))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child(title.to_string()),
-            )
+    /// 单张诊断卡：卡片头 + 分隔线 + 行区（空态区分检测中 / 未开始两种文案）
+    fn diag_card(&self, pal: &Palette, title: &str, rows: &[DiagRow]) -> impl IntoElement {
+        card(pal)
+            .child(card_header(pal, title.to_string()))
+            .child(card_divider(pal))
             .when(rows.is_empty(), |s| {
-                s.child(crate::ui::table_empty(theme, if self.running { "检测中…" } else { "点击「运行诊断」开始检测" }))
+                s.child(table_empty(
+                    pal,
+                    if self.running {
+                        "检测中…"
+                    } else {
+                        "点击「运行诊断」开始检测"
+                    },
+                ))
             })
             .when(!rows.is_empty(), |s| {
                 let cloned: Vec<DiagRow> = rows.to_vec();
-                s.child(self.rows(theme, &cloned))
+                s.child(self.rows(pal, &cloned))
             })
     }
 }

@@ -1,18 +1,25 @@
 // secm-app::pages::environment — 环境检测页
 // 系统信息 8 字段 + 游戏环境预设对比 + DirectX 诊断 + VC++ 运行库 + AI 工具检测。
 //
+// 呈现层：统一接入 crate::ui::page 页面布局框架（页头/卡片/横幅/按钮/键值行），
+// 色板取自 pi_clone::theme::Palette，明暗随壳 Appearance 联动，禁止硬编码业务色。
+//
 // 并发模型：全部检测（注册表/命令/npm）在后台线程执行；View 构造仅占位并立即
 // 启动后台任务，完成后经 WeakEntity 回 UI。主线程绝不执行检测或注册表写。
 
 use gpui::prelude::*;
-use gpui::{div, px, rgb, SharedString, Window, Context, Render, WeakEntity};
+use gpui::{div, px, Context, Render, SharedString, WeakEntity, Window};
 use secm_core::environment::{
     self, AiToolsInfo, CheckStatus, DirectXInfo, DxCheck, VcRuntimeInfo,
 };
 use secm_core::game_env::{self, GamePreset, GameSetting};
 use secm_core::sysinfo::{self, SystemInfo};
 
-use crate::theme::Theme;
+use crate::pi_clone::theme::{Appearance, Palette};
+use crate::ui::page::{
+    banner, button, button_sm, card, card_body, card_divider, card_header, kv_row_w, page_header,
+    page_root, table_empty, BannerKind, ButtonKind,
+};
 
 /// 静态检测结果包（后台一次算齐，回 UI 赋值）
 struct StaticEnvData {
@@ -37,10 +44,14 @@ pub struct EnvironmentView {
     applying: bool,
     /// 页面错误/状态
     status: String,
+    /// 页面外观，随壳主题联动
+    appearance: Appearance,
+    /// 页面滚动状态（GPUI 0.2 滚轮需 track_scroll 手动驱动，见 ui::page::page_root）
+    page_scroll: gpui::ScrollHandle,
 }
 
 impl EnvironmentView {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(appearance: Appearance, cx: &mut Context<Self>) -> Self {
         log::info!("环境检测 · 页面已打开");
         let mut v = Self {
             system: None,
@@ -52,10 +63,23 @@ impl EnvironmentView {
             ai_loading: false,
             applying: false,
             status: String::from("正在检测环境…"),
+            appearance,
+            page_scroll: gpui::ScrollHandle::new(),
         };
         v.start_static_load(cx);
         v.run_ai_check(cx);
         v
+    }
+
+    /// 当前页面色板（明暗随壳联动）
+    fn pal(&self) -> Palette {
+        Palette::for_appearance(self.appearance)
+    }
+
+    /// 壳切换主题时同步外观（PiShell::toggle_theme 联动调用）
+    pub(crate) fn set_appearance(&mut self, appearance: Appearance, cx: &mut Context<Self>) {
+        self.appearance = appearance;
+        cx.notify();
     }
 
     /// 后台加载静态检测（系统信息/DX/VC++/游戏预设 —— 注册表多线程 + PS 回退，秒级）
@@ -197,12 +221,12 @@ impl EnvironmentView {
         .detach();
     }
 
-    fn check_color(status: &CheckStatus, theme: &Theme) -> gpui::Rgba {
+    fn check_color(status: &CheckStatus, pal: &Palette) -> gpui::Rgba {
         match status {
-            CheckStatus::Pass => theme.success,
-            CheckStatus::Warn => theme.warn,
-            CheckStatus::Fail => theme.danger,
-            CheckStatus::Info => theme.text_muted,
+            CheckStatus::Pass => pal.success,
+            CheckStatus::Warn => pal.warning,
+            CheckStatus::Fail => pal.danger,
+            CheckStatus::Info => pal.text_muted,
         }
     }
 
@@ -216,10 +240,10 @@ impl EnvironmentView {
     }
 
     /// 检测条目行（DX/VC++ 通用：状态图标 + 名 + 详情）
-    fn check_row(&self, theme: &Theme, c: &DxCheck) -> impl IntoElement {
+    fn check_row(&self, pal: &Palette, c: &DxCheck) -> impl IntoElement {
         let name = c.name.clone();
         let detail = c.detail.clone();
-        let color = Self::check_color(&c.status, theme);
+        let color = Self::check_color(&c.status, pal);
         let icon = Self::check_icon(&c.status).to_string();
         div()
             .flex()
@@ -228,7 +252,7 @@ impl EnvironmentView {
             .px_5()
             .py_2()
             .border_b_1()
-            .border_color(theme.border)
+            .border_color(pal.border)
             .child(
                 div()
                     .text_size(px(12.5))
@@ -241,13 +265,13 @@ impl EnvironmentView {
                     .w(px(150.0))
                     .flex_none()
                     .text_size(px(12.5))
-                    .text_color(theme.text)
+                    .text_color(pal.text)
                     .child(name),
             )
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(theme.text_muted)
+                    .text_color(pal.text_muted)
                     .child(detail),
             )
     }
@@ -255,7 +279,7 @@ impl EnvironmentView {
 
 impl Render for EnvironmentView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::dark();
+        let pal = self.pal();
         let status = self.status.clone();
         let ai_loading = self.ai_loading;
         let static_loading = self.static_loading;
@@ -266,91 +290,53 @@ impl Render for EnvironmentView {
         let presets: Vec<GamePreset> = self.presets.clone();
         let applying = self.applying;
 
-        div()
-            .id("environment-page-root")
-            .flex_col()
-            .size_full()
-            .p_6()
-            .gap_4()
-            // 内容超高时整页纵向滚动
-            .overflow_y_scroll()
-            // 页头
+        // 统一页面骨架：根容器（统一内边距/纵向节奏/超高纵向滚动）
+        page_root(&pal, "environment-page-root", &self.page_scroll, &cx.entity())
+            // 页头：标题/副标题居左，右侧动作区挂「重新检测」（id/回调/文案逻辑保持）
             .child(
-                div()
-                    .flex()
-                    .items_baseline()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_size(px(24.0))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(theme.text)
-                            .child("环境检测"),
-                    )
-                    .child(
-                        div()
-                            .id("env-rescan")
-                            .px_4()
-                            .py_1p5()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .bg(theme.panel_hover)
-                            .hover(|s| s.bg(theme.border))
-                            .text_color(theme.text)
-                            .text_size(px(12.5))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.rescan(cx);
-                            }))
-                            .child(if static_loading || ai_loading { "检测中…" } else { "重新检测" }),
-                    ),
+                page_header(&pal, "环境检测", "系统信息 · 游戏环境预设 · DirectX / VC++ · AI 工具").child(
+                    button(&pal, ButtonKind::Secondary)
+                        .id("env-rescan")
+                        .child(if static_loading || ai_loading { "检测中…" } else { "重新检测" })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.rescan(cx);
+                        })),
+                ),
             )
             // 状态
             .when(!status.is_empty(), |s| {
                 let msg = status.clone();
-                s.child(
-                    div()
-                        .px_4()
-                        .py_2()
-                        .rounded_md()
-                        .bg(theme.panel_hover)
-                        .text_size(px(12.0))
-                        .text_color(theme.info)
-                        .child(msg),
-                )
+                s.child(banner(&pal, BannerKind::Info, msg))
             })
             // 系统信息卡
-            .child(self.system_card(&theme, &sys))
+            .child(self.system_card(&pal, &sys))
             // 游戏环境预设
-            .child(self.presets_section(&theme, &presets, applying, cx))
-            // DirectX + VC++ 双列
+            .child(self.presets_section(&pal, &presets, applying, cx))
+            // DirectX + VC++ 双列（flex 等宽两列；禁 grid —— taffy grid 滚动容器内不渲染）
             .child(
                 div()
-                    .grid()
-                    .grid_cols(2)
+                    .flex()
                     .gap_4()
-                    .child(self.dx_card(&theme, &dx))
-                    .child(self.vc_card(&theme, &vc)),
+                    .child(
+                        div().flex_1().min_w(px(0.0)).child(self.dx_card(&pal, &dx)),
+                    )
+                    .child(
+                        div().flex_1().min_w(px(0.0)).child(self.vc_card(&pal, &vc)),
+                    ),
             )
             // AI 工具卡
-            .child(self.ai_card(&theme, &ai, ai_loading, cx))
+            .child(self.ai_card(&pal, &ai, ai_loading, cx))
     }
 }
 
 impl EnvironmentView {
     /// 系统信息 8 字段卡（None=后台加载中 → 占位）
-    fn system_card(&self, theme: &Theme, s: &Option<SystemInfo>) -> impl IntoElement {
+    fn system_card(&self, pal: &Palette, s: &Option<SystemInfo>) -> impl IntoElement {
         let Some(s) = s else {
-            return crate::ui::table_container(theme)
-                .child(
-                    div()
-                        .px_5()
-                        .py_3()
-                        .text_size(px(14.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text)
-                        .child("系统信息"),
-                )
-                .child(crate::ui::table_empty(theme, "检测中…"))
+            return card(pal)
+                .child(card_header(pal, "系统信息"))
+                .child(card_divider(pal))
+                .child(table_empty(pal, "检测中…"))
                 .into_any_element();
         };
         let rows: Vec<(&str, String)> = vec![
@@ -362,61 +348,27 @@ impl EnvironmentView {
             ("最新补丁", format!("{} · {}", s.latest_patch.kb, s.latest_patch.title_cn)),
             ("启动模式", s.boot_mode.clone()),
         ];
-        crate::ui::table_container(theme)
-            .child(
-                div()
-                    .px_5()
-                    .py_3()
-                    .text_size(px(14.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child("系统信息"),
-            )
-            .children(rows.into_iter().map(|(k, v)| {
-                let k = k.to_string();
-                div()
-                    .flex()
-                    .items_center()
-                    .px_5()
-                    .py_1p5()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(
-                        div()
-                            .w(px(100.0))
-                            .flex_none()
-                            .text_size(px(12.0))
-                            .text_color(theme.text_muted)
-                            .child(k),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.5))
-                            .text_color(theme.text)
-                            .child(v),
-                    )
-            }))
+        card(pal)
+            .child(card_header(pal, "系统信息"))
+            .child(card_divider(pal))
+            // 键值行统一走 kv_row 节奏（原行分隔线去掉，标签定宽 100 对齐）
+            .child(card_body(pal).children(rows.into_iter().map(|(k, v)| {
+                kv_row_w(pal, 100.0, k, v)
+            })))
             .into_any_element()
     }
 
     /// 游戏环境预设对比（含一键套用；applying=true 时禁用按钮防重复提交）
     fn presets_section(
         &self,
-        theme: &Theme,
+        pal: &Palette,
         presets: &[GamePreset],
         applying: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        crate::ui::table_container(theme)
-            .child(
-                div()
-                    .px_5()
-                    .py_3()
-                    .text_size(px(14.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child("游戏环境预设（推荐设置对比当前状态）"),
-            )
+        card(pal)
+            .child(card_header(pal, "游戏环境预设（推荐设置对比当前状态）"))
+            .child(card_divider(pal))
             .children(presets.iter().map(|p| {
                 let name = p.name.clone();
                 let engine = p.engine.clone();
@@ -425,12 +377,32 @@ impl EnvironmentView {
                 let preset_for_click = p.clone();
                 let applied_id = SharedString::from(format!("preset-{}", p.id));
                 let disabled = applying;
+                // 套用按钮：可套用=主操作钮，已达标=弱化幽灵钮；文案/互斥逻辑保持
+                let btn_label = if ok_all {
+                    "已达标"
+                } else if disabled {
+                    "应用中…"
+                } else {
+                    "一键套用"
+                };
+                let apply_btn = if ok_all {
+                    button_sm(pal, ButtonKind::Ghost)
+                } else {
+                    button_sm(pal, ButtonKind::Primary)
+                }
+                .id(applied_id)
+                .child(btn_label)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if !ok_all && !disabled {
+                        this.apply_preset(&preset_for_click, cx);
+                    }
+                }));
                 div()
                     .flex_col()
                     .px_5()
                     .py_3()
                     .border_b_1()
-                    .border_color(theme.border)
+                    .border_color(pal.border)
                     .child(
                         div()
                             .flex()
@@ -445,45 +417,23 @@ impl EnvironmentView {
                                         div()
                                             .text_size(px(13.5))
                                             .font_weight(gpui::FontWeight::MEDIUM)
-                                            .text_color(theme.text)
+                                            .text_color(pal.text)
                                             .child(name),
                                     )
                                     .child(
                                         div()
                                             .text_size(px(11.0))
-                                            .text_color(theme.text_muted)
+                                            .text_color(pal.text_muted)
                                             .child(engine),
                                     )
                                     .child(
                                         div()
                                             .text_size(px(11.5))
-                                            .text_color(if ok_all { theme.success } else { theme.warn })
+                                            .text_color(if ok_all { pal.success } else { pal.warning })
                                             .child(if ok_all { "全部达标" } else { "有未达标项" }),
                                     ),
                             )
-                            .child(
-                                div()
-                                    .id(applied_id)
-                                    .px_3()
-                                    .py_1()
-                                    .rounded_md()
-                                    .cursor_pointer()
-                                    .when(!ok_all, |s| {
-                                        s.bg(theme.brand)
-                                            .hover(|s| s.bg(rgb(0x3d66e6)))
-                                            .text_color(rgb(0xffffff))
-                                    })
-                                    .when(ok_all, |s| {
-                                        s.bg(theme.panel_hover).text_color(theme.text_muted)
-                                    })
-                                    .text_size(px(11.5))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        if !ok_all && !disabled {
-                                            this.apply_preset(&preset_for_click, cx);
-                                        }
-                                    }))
-                                    .child(if ok_all { "已达标" } else if disabled { "应用中…" } else { "一键套用" }),
-                            ),
+                            .child(apply_btn),
                     )
                     .children(settings.iter().map(|s| {
                         let label = s.label.clone();
@@ -501,21 +451,21 @@ impl EnvironmentView {
                                 div()
                                     .size(px(6.0))
                                     .rounded_full()
-                                    .bg(if ok { theme.success } else { theme.warn }),
+                                    .bg(if ok { pal.success } else { pal.warning }),
                             )
                             .child(
                                 div()
                                     .w(px(150.0))
                                     .flex_none()
                                     .text_size(px(12.0))
-                                    .text_color(theme.text)
+                                    .text_color(pal.text)
                                     .child(label),
                             )
                             .child(
                                 div()
                                     .flex_1()
                                     .text_size(px(11.0))
-                                    .text_color(theme.text_muted)
+                                    .text_color(pal.text_muted)
                                     .child(desc),
                             )
                             .child(
@@ -523,7 +473,7 @@ impl EnvironmentView {
                                     .w(px(80.0))
                                     .flex_none()
                                     .text_size(px(11.5))
-                                    .text_color(theme.text_muted)
+                                    .text_color(pal.text_muted)
                                     .child(format!("推荐 {}", rec)),
                             )
                             .child(
@@ -531,7 +481,7 @@ impl EnvironmentView {
                                     .w(px(80.0))
                                     .flex_none()
                                     .text_size(px(11.5))
-                                    .text_color(if ok { theme.success } else { theme.danger })
+                                    .text_color(if ok { pal.success } else { pal.danger })
                                     .child(format!("当前 {}", cur)),
                             )
                     }))
@@ -539,78 +489,46 @@ impl EnvironmentView {
     }
 
     /// DirectX 诊断卡（None=加载中）
-    fn dx_card(&self, theme: &Theme, dx: &Option<DirectXInfo>) -> impl IntoElement {
+    fn dx_card(&self, pal: &Palette, dx: &Option<DirectXInfo>) -> impl IntoElement {
         let Some(dx) = dx else {
-            return crate::ui::table_container(theme)
-                .child(
-                    div()
-                        .px_5()
-                        .py_3()
-                        .text_size(px(14.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text)
-                        .child("DirectX 诊断"),
-                )
-                .child(crate::ui::table_empty(theme, "检测中…"))
+            return card(pal)
+                .child(card_header(pal, "DirectX 诊断"))
+                .child(card_divider(pal))
+                .child(table_empty(pal, "检测中…"))
                 .into_any_element();
         };
         let checks: Vec<DxCheck> = dx.checks.clone();
         let version = dx.version.clone();
-        crate::ui::table_container(theme)
+        card(pal)
+            // 卡片头标题 flex_1，版本号自动靠右（accent 强调）
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px_5()
-                    .py_3()
-                    .child(
-                        div()
-                            .text_size(px(14.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child("DirectX 诊断"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(theme.brand)
-                            .child(SharedString::from(format!("DirectX {}", version))),
-                    ),
+                card_header(pal, "DirectX 诊断").child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(pal.accent)
+                        .child(SharedString::from(format!("DirectX {}", version))),
+                ),
             )
-            .children(checks.iter().map(|c| self.check_row(theme, c)))
+            .child(card_divider(pal))
+            .children(checks.iter().map(|c| self.check_row(pal, c)))
             .into_any_element()
     }
 
     /// VC++ 运行库卡（None=加载中）
-    fn vc_card(&self, theme: &Theme, vc: &Option<VcRuntimeInfo>) -> impl IntoElement {
+    fn vc_card(&self, pal: &Palette, vc: &Option<VcRuntimeInfo>) -> impl IntoElement {
         let Some(vc) = vc else {
-            return crate::ui::table_container(theme)
-                .child(
-                    div()
-                        .px_5()
-                        .py_3()
-                        .text_size(px(14.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text)
-                        .child("VC++ 运行库"),
-                )
-                .child(crate::ui::table_empty(theme, "检测中…"))
+            return card(pal)
+                .child(card_header(pal, "VC++ 运行库"))
+                .child(card_divider(pal))
+                .child(table_empty(pal, "检测中…"))
                 .into_any_element();
         };
         let runtimes: Vec<_> = vc.runtimes.clone();
         let checks: Vec<DxCheck> = vc.checks.clone();
-        crate::ui::table_container(theme)
-            .child(
-                div()
-                    .px_5()
-                    .py_3()
-                    .text_size(px(14.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child("VC++ 运行库"),
-            )
-            .children(checks.iter().map(|c| self.check_row(theme, c)))
+        card(pal)
+            .child(card_header(pal, "VC++ 运行库"))
+            .child(card_divider(pal))
+            .children(checks.iter().map(|c| self.check_row(pal, c)))
             .child(
                 div()
                     .flex_col()
@@ -630,25 +548,25 @@ impl EnvironmentView {
                                 div()
                                     .size(px(6.0))
                                     .rounded_full()
-                                    .bg(if installed { theme.success } else { theme.danger }),
+                                    .bg(if installed { pal.success } else { pal.danger }),
                             )
                             .child(
                                 div()
                                     .flex_1()
                                     .text_size(px(12.0))
-                                    .text_color(theme.text)
+                                    .text_color(pal.text)
                                     .child(name),
                             )
                             .child(
                                 div()
                                     .text_size(px(11.5))
-                                    .text_color(theme.text_muted)
+                                    .text_color(pal.text_muted)
                                     .child(arch),
                             )
                             .child(
                                 div()
                                     .text_size(px(11.5))
-                                    .text_color(if installed { theme.text_muted } else { theme.danger })
+                                    .text_color(if installed { pal.text_muted } else { pal.danger })
                                     .child(if installed { ver } else { "未安装".to_string() }),
                             )
                     })),
@@ -659,31 +577,24 @@ impl EnvironmentView {
     /// AI 工具卡（10 项并行检测结果）
     fn ai_card(
         &self,
-        theme: &Theme,
+        pal: &Palette,
         ai: &Option<AiToolsInfo>,
         loading: bool,
         _cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        crate::ui::table_container(theme)
-            .child(
-                div()
-                    .px_5()
-                    .py_3()
-                    .text_size(px(14.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child("AI 开发工具"),
-            )
+        card(pal)
+            .child(card_header(pal, "AI 开发工具"))
+            .child(card_divider(pal))
             .when(loading, |s| {
-                s.child(crate::ui::table_empty(theme, "检测中…（npm 查询，请稍候）"))
+                s.child(table_empty(pal, "检测中…（npm 查询，请稍候）"))
             })
             .when(ai.is_none() && !loading, |s| {
-                s.child(crate::ui::table_empty(theme, "点击「重新检测」运行 AI 工具检测"))
+                s.child(table_empty(pal, "点击「重新检测」运行 AI 工具检测"))
             })
             .when_some(ai.clone(), |s, info| {
                 let tools = info.tools;
                 let checks: Vec<DxCheck> = info.checks;
-                s.children(checks.iter().map(|c| self.check_row(theme, c)))
+                s.children(checks.iter().map(|c| self.check_row(pal, c)))
                     .child(
                         div()
                             .flex_col()
@@ -700,19 +611,19 @@ impl EnvironmentView {
                                     .px_5()
                                     .py_1p5()
                                     .border_b_1()
-                                    .border_color(theme.border)
+                                    .border_color(pal.border)
                                     .child(
                                         div()
                                             .size(px(6.0))
                                             .rounded_full()
-                                            .bg(if installed { theme.success } else { theme.text_muted }),
+                                            .bg(if installed { pal.success } else { pal.text_muted }),
                                     )
                                     .child(
                                         div()
                                             .w(px(130.0))
                                             .flex_none()
                                             .text_size(px(12.5))
-                                            .text_color(theme.text)
+                                            .text_color(pal.text)
                                             .child(name),
                                     )
                                     .child(
@@ -720,21 +631,21 @@ impl EnvironmentView {
                                             .w(px(90.0))
                                             .flex_none()
                                             .text_size(px(11.0))
-                                            .text_color(theme.text_muted)
+                                            .text_color(pal.text_muted)
                                             .child(cmd),
                                     )
                                     .child(
                                         div()
                                             .flex_1()
                                             .text_size(px(12.0))
-                                            .text_color(if installed { theme.text_muted } else { theme.text_muted })
+                                            .text_color(pal.text_muted)
                                             .child(if installed { version } else { "未安装".to_string() }),
                                     )
                                     .when(installed && upgradable, |r| {
                                         r.child(
                                             div()
                                                 .text_size(px(11.0))
-                                                .text_color(theme.warn)
+                                                .text_color(pal.warning)
                                                 .child("可升级"),
                                         )
                                     })

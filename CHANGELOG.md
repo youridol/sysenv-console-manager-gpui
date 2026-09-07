@@ -1,5 +1,172 @@
 # 更新日志
 
+## [v2.10.4] - 2026-09-07
+### 修复（PATCH：卡片纵向黏连真根因 —— taffy 0.9.0 纵向 gap 不渲染，改逐块 margin）
+- **根因（彩色标记取证法定位）**：给关于页各层临时涂唯一纯色（内容体=绿/页头=蓝/
+  信息卡=红）后逐像素分段实测——页头→卡片、卡片→卡片之间 **0px 绿色分离带**
+  （三段子块直接黏连），且 `PAGE_GAP` 提到 72px 亦无任何变化 → **容器 `.gap()` 的
+  纵向分量（taffy gap.height）在 gpui 0.2.2 + taffy 0.9.0 组合下不渲染**（横向
+  gap.width 正常 —— 与"左右间距正常、上下黏连"现象完全吻合）。v2.10.3 的
+  "机制正常"结论系测量误判（把卡内 sparkline 区 56px 高度误读为分离带），据此
+  调大 gap 数值自然无效
+- **修复**：纵向间距弃用容器 gap，改由块级组件自带下外边距承担 ——
+  `page_header` / `card` / `banner` 统一 `.mb(PAGE_GAP=24)`（覆盖全部页面的
+  页头→卡、卡→卡、卡→区块边界）；page_root / page_body 移除无效的容器 gap；
+  dashboard 卡内节奏（统计行/趋势组/网卡速率行/磁盘分组）改显式 `.mt()`；
+  settings 异类策略 chips 行补 `.mt()`
+- **验证（真机像素级，PrintWindow 清洁取证）**：
+  - 硬件信息页：三行卡间出现 **22px / 26px** 页面背景分离带（≈24±描边）
+  - 关于页：产品卡↔信息卡 **26~32px** 分离带（x=1030/x=305 两列，差值为圆角）
+  - `cargo check` 零警告；`cargo test` 89 通过 0 失败
+
+## [v2.10.3] - 2026-09-07
+### 调整（PATCH：页级纵向节奏数值 16 → 20）
+- 调整 `PAGE_GAP` 16 → 20、dashboard 行内 `ROW_GAP` 对齐 20
+- 注：该版基于"容器 gap 机制正常"的误判结论（把卡内 sparkline 区域 56px 高度
+  误读为卡间分离带），数值调整未能解决黏连 —— 真根因与修复见 v2.10.4
+
+## [v2.10.2] - 2026-09-07
+### 修复（PATCH：切页后主内容区空白 + 主内容区滚轮失效 —— 布局与滚动机制双根因）
+- **修复一：侧边栏切换页面后主显示区空白（全部功能组件丢失）**
+  - 根因：v2.10.1 的滚动修复在 `flex_1` 包装层内嵌套 `absolute inset-0` 装载页面，
+    taffy 0.9 对该形态的 inset 解析失败 → 页面零尺寸、主区只剩背景
+    （真机 TOPMOST 实屏抓取实证：基线与切页后主区均无内容像素）
+  - 修复：改用 v2.8.5 日志面板同款模式 —— main 自身 `h_full + relative`（definite
+    高度），topbar 留在流内，页面挂载到 `absolute top(TOP_BAR_HEIGHT) bottom_0
+    left_0 right_0` 区域；`shell.rs` 内写入三种挂载模式的教训注释
+  - 验证（非空断言）：硬件信息 124,019 / 清理优化 64,983 / 关于 49,475 surface
+    像素，硬件信息 vs 清理优化差异 79,528 —— 切页渲染全部恢复
+- **修复二：主内容区内容超高后滚轮无法滚动（从始至终未工作过）**
+  - 根因（滚轮处理器插桩日志实证）：GPUI 0.2 的 `overflow_y_scroll` 需
+    `track_scroll(&ScrollHandle)` 绑定才有滚轮驱动，且滚轮改写偏移后不会自动重绘；
+    page_root 此前两者皆缺。插桩确认：绑定后事件到达、`max_off=404px`、offset
+    每档移动 78px，仅缺实体 notify 重绘（`window.refresh()` 时机不对无效）
+  - 修复：page_root 增加 `track_scroll` + `on_scroll_wheel`（事件后实体 notify）；
+    页面视图各持有 `ScrollHandle` 并传入
+  - 验证：硬件信息页（内容 1265px > 视口 861px，max_off=404）下滚 8 档同位差异
+    **27,646 像素** —— 滚动生效；清理优化页内容不足一屏无滚余量，滚轮无位移为
+    正确行为（此前的"0 差异"部分为测量页面选择不当所致，已甄别）
+- **验证**：`cargo check` 零警告；`cargo test` 89 通过 0 失败；真机交互链路
+  （点击导航 → 页面创建 → 渲染 → 滚动）端到端像素级回归通过
+
+## [v2.10.1] - 2026-09-07
+### 修复（PATCH：主内容区滚动失效 —— taffy min-content 撑爆滚动容器）
+- **根因（滚轮消息注入 + 帧差分实证复现）**：`shell.rs::render_main` 的页面包装层
+  为 `flex_1`，taffy 中其 min-content 高度被页面内容撑爆（`min_h(0)` 无法压制，
+  v2.8.5 同族缺陷）→ 页面滚动容器高度恒等于内容全高 → `max_offset` 恒 0 →
+  内容超出视口后滚轮无效（10 档注入前后主区差异仅 320 像素 = 实时数据噪声）
+- **修复**：`render_main` 改用 v2.8.5 已验证的显式高度链 —— `relative` 包裹 +
+  `absolute inset-0` 装载页面，页面根容器获得确定的视口高度，内容超界后正常滚动
+- **回归验证**：修复后注入 10 档滚轮，前后帧 131,250 个采样点与"内容上移 40px"
+  精确匹配、同位置差异 0 —— 滚动生效
+### 优化（容器纵向间距节奏统一收紧）
+- 页级纵向节奏 `PAGE_GAP` 18 → 16；卡片头内边距 13 → 12；卡片体 14/10 → 12/8，
+  构成统一 **16（页）/12（卡头）/8（卡体）** 间距节奏
+- 卡内趋势图标签与图表成组（组内 4px），消除"标签悬浮"的松散感；
+  dashboard 行内横向间距与页级纵向节奏对齐（16px）
+
+## [v2.10.0] - 2026-09-07
+### 修复（硬件信息页卡片容器全部丢失 —— taffy grid 布局缺陷）
+- **根因（PrintWindow 清洁截图像素级实证）**：gpui 0.2.2 (taffy 0.9) 的
+  `.grid().grid_cols(2)` 网格子树在 `overflow_y_scroll` 滚动容器内**不产出可渲染
+  布局**——页头/背景正常渲染，但网格子树（卡片 + 其后内容）零像素（surface 色
+  `0x252527` 面积为 0）。首次截图中曾误判为渲染正常，实为 `CopyFromScreen` 抓取
+  失效（桌面存在 13 个重叠窗口，DirectComposition 内容抓取被遮挡），换用
+  `PrintWindow(PW_RENDERFULLCONTENT)` 后取得干净证据
+- **修复**：硬件信息/环境检测/AI 环境三页全部弃用 `.grid()`，改用 flex 等宽两列
+  行布局（全应用已验证渲染路径均为 flex）；`ui/page.rs` 明确禁 grid 布局纪律
+- **回归验证**：修复后同口径像素统计 surface 面积 0 → 125,903，3 行×2 列卡片
+  全部渲染
+
+### 新增（MINOR：硬件监测功能补齐 + 趋势历史持久化）
+- **每秒轮询传感器**：保留 SensorService 1s 快照链路（CPU 占用/频率/温度、内存、
+  磁盘），并同拍拉取趋势窗口
+- **60 秒趋势图（`ui::page::sparkline` 柱状趋势构件）**：CPU/GPU/内存占用趋势 +
+  下载/上传速率趋势（总量口径），每秒采样、60s 滚动窗口
+- **趋势历史持久化（新增 `secm-core::sensor_history` 模块）**：专职 1s 采样线程 +
+  有界序列（主序列 1800 点），JSON 原子落盘
+  `%LOCALAPPDATA%\SECM\cache\sensor_history.json`（脏后 10s 落盘 + on_app_quit
+  flush 兜底），应用重启后趋势自动恢复；单网卡序列内存态随 UI 采样积累
+- **网络流量卡**：总量/各网卡数据源切换；**0.5s–5s 可调采样间隔**（新增
+  `netif::if_bytes_map` —— GetIfTable2 累计字节差分，无 PDH ≥1s 间隔限制）；
+  **活跃 TCP 连接数**（新增 `net_io::tcp_connection_count` —— GetExtendedTcpTable
+  统计 ESTABLISHED）；链路协商速度展示；各网卡实时上下行速率行
+- **磁盘存储 + SMART 健康卡**：物理盘枚举 + 型号/容量 + SMART 健康三级状态
+  （正常绿/风险关注黄/告警红）+ 温度（NVMe 健康日志 → WMI → ATA 194/190 降级链）
+  + 劣化前兆黄色警示（NVMe 寿命 ≥80%、媒体错误、备用空间逼近阈值）
+- **验证**：`cargo check` 零警告；`cargo test` 89 通过 0 失败（含新增
+  sensor_history 窗口过滤/容量裁剪单测）；真机截图像素回归通过
+
+## [v2.9.0] - 2026-09-07
+### 新增（MINOR：统一主内容区布局框架 + 全页面现代化改版 + 明暗主题全链路联动）
+- **统一页面布局框架 `ui::page`（新增模块）**：左侧边栏全部页面的主内容区收敛到单一装配
+  入口，布局/间距/圆角/描边全应用统一节奏——
+  - 骨架：`page_root`（根容器/纵向滚动，id 入参返回 Stateful）、`page_header`
+    （页头：标题 + 副标题 + 右侧动作区）
+  - 卡片：`card` / `card_header` / `card_header_accent` / `card_divider` / `card_body`
+  - 数据表：`table_head` / `table_row` / `table_empty`（`ColWidth::Flex/Px` 列宽规格化，
+    修复原表头全 flex 与数据行固定宽错位问题）
+  - 反馈与控件：`banner`（Info/Success/Warn/Danger 软底语义状态条）、
+    `button` / `button_sm`（Primary/Secondary/Ghost/Danger/Warning 语义按钮，h32/h24）、
+    `kv_row_w` / `status_pill` / `badge` / `section_title` / `field_label` / `metric_value`
+- **主题全链路联动**：页面内容区此前硬编码深色（`Theme::dark()` 不随壳切换，浅色模式下
+  内容区仍是深色），现全部迁移至 `pi_clone::theme::Palette`（明暗双套）；壳
+  `PiShell::toggle_theme` 向全部已实例化页面实体同步外观（新增 `set_appearance` 联动口），
+  懒加载页构造时取当前外观；旧 `theme.rs` 模块及 Theme 色板删除，色值全部语义化
+- **10 页全量改版**（业务逻辑/后台任务/元素 id/交互行为逐行保留，仅呈现层重构）：
+  硬件信息、系统设置、服务管理、清理优化、网络诊断、网络配置、环境检测、AI 环境、
+  硬件检测、关于——统一页头（标题+副标题+右侧动作/状态徽标）、统一卡片体系、
+  清除全部硬编码业务色（rgb(0x…) → 语义色板）、状态消息统一 banner、
+  行内操作按钮统一 button_sm 尺寸语义
+- **验证**：`cargo check --workspace` 零警告；`cargo test --workspace` 87 通过 / 0 失败
+
+## [v2.8.5] - 2026-09-07
+### 修复（PATCH：日志流滚动条消失 + 滚轮拖动全失灵 —— 布局高度链断链）
+- **根因（真实壳逐层实测定位）**：GPUI 0.2 (taffy) 纵向 flex 布局中，`flex_1`
+  子项会被内容 min-content 高度撑爆——`min_h(0)` / `min_h(1px)` /
+  `flex_basis(0px)` 均无法压制该约束。日志流容器 `pi-log-stream` 因此高度恒等
+  于内容高度（实测 7575px == 200 行内容高），`max_offset` 恒 0、永不溢出：
+  - 滚轮：clamp 区间 [0,0] → 滚动无效
+  - 滚动条：`scrollable=false`（v2.8.4 显隐改由 scrollable 控制后直接消失；
+    v2.8.2 时代则是"显示但拖动早退"）
+  - 拖动：无溢出可滚
+  该布局缺陷是 v2.8.0 以来全部滚动失灵的最底层根因（v2.8.4 的符号修复仍必要，
+  但被布局断链掩盖）
+- **修复**：显式高度链替代 flex_1 弹性链——
+  - `pi-log-panel-content` 加 `relative()`（定位上下文）
+  - `pi-log-stream-wrap` 改 `absolute top(48) bottom_0 left_0 right_0` 铺满
+    header 以下区域（definite 高度）；header 高度抽 `LOG_PANEL_HEADER_HEIGHT`
+    常量对齐
+  - `pi-log-stream` 改 `h_full + flex_none` 显式占满 wrap
+- **验证**：真实 PiShell 壳内实测——修复前 viewport_h=7575/max_off=0/不可滚；
+  修复后 viewport_h=852（900−48 header）、max_off=6723（200 行真实溢出）、
+  thumb 正常渲染（h=96）、程序化拖动换算被真实 ScrollHandle 精确采纳
+  （off_y 0→-1700、thumb_top 实时跟随）
+- 注：v2.8.3/v2.8.4 为中间尝试（notify / 符号语义），均被本版布局修复收编
+
+## [v2.8.4] - 2026-09-07
+### 修复（PATCH：日志流滚动条完全失灵 —— thumb 显示 + 拖动 + 滚轮）
+- **根因（实测 probe 定位）**：项目把 GPUI `ScrollHandle::max_offset()` 的语义
+  用反了。GPUI 0.2 中 `max_offset()` 返回 **≥0 的正可滚动量**（内容高 − 视口高），
+  `offset().y` 取值区间为 `[-max_offset, 0]`（下滚为负）。而 v2.8.0-2.8.3 三处
+  滚动换算（`scrollbar_geometry`、`log_sb_drag_move`、`log_sb_thumb_down`）全部
+  假设 `max_offset() < 0` 才可滚、`≥0` 直接早退返回 —— max_offset 恒为正，导致：
+  - thumb 几何恒 `(0,0,false)`，滚动条 thumb 永不渲染/拖动换算在早退处
+    直接 return，`set_offset` 从不执行 —— "有侧边滚动条但鼠标按住拉动完全
+    无反应、实时输出也无法滚动" 的直接原因
+  - 上一版 v2.8.3 仅补 `cx.notify()`（set_offset 后需重绘才上屏，次要因素），
+    未触及符号根因，故无效
+- **修复**：
+  - 新增 `pi_clone/scroll_math.rs`：把 thumb 几何 / 拖动换算 / offset 占比抽成
+    纯函数，全部按 GPUI 真实语义（max_off ≥ 0、offset ∈ [-max,0]）实现
+  - `right_panel.rs::scrollbar_geometry` / `shell.rs::log_sb_drag_move` /
+    `log_sb_thumb_down` 改用共用纯函数；拖动路径保留每帧 `cx.notify()`
+  - 滚动条显隐改由 `scrollable`（内容是否真超高）控制，行数 >3 不再作为依据
+- **验证**：真窗口渲染 probe 实测 —— 120 行内容 max_off=2280 时 thumb 正常渲染
+  且可拖；拖动 +60px → offset=-288、+240px → offset=-1440，thumb 实时跟随；
+  实时追加 200 行后已下滚位置不被拉回顶（max_off 重算、thumb 重排）
+- 注：v2.8.3 为中间尝试（仅补 notify），未发布即在本版合并修正
+
 ## [v2.8.2] - 2026-09-06
 ### 修复（PATCH：日志流真正可滚动 + 滚动条可见贴右缘）
 - **日志无法滚动根因一（内容被压缩）**：滚动容器子行 GPUI 默认 `flex_shrink=1`，

@@ -50,8 +50,11 @@ impl PiShell {
             self.right_display_w
         };
 
-        // 面板内容（共享，避免重复）
+        // 面板内容（共享，避免重复）。relative 为日志流区（absolute 铺底）提供
+        // 定位上下文；header 固定 48px，流区 absolute top(48) 铺满剩余高度。
         let content = div()
+            .id("pi-log-panel-content")
+            .relative()
             .flex_col()
             .size_full()
             .bg(pal.bg)
@@ -103,7 +106,7 @@ impl PiShell {
         div()
             .flex()
             .items_center()
-            .h(px(48.0))
+            .h(px(layout::LOG_PANEL_HEADER_HEIGHT))
             .flex_shrink_0()
             .px(px(10.0))
             .gap(px(6.0))
@@ -252,7 +255,6 @@ impl PiShell {
                     .into_any_element()
             })
             .collect();
-        let row_count = rows.len();
 
         // 滚动句柄（懒创建并持有；track_scroll 要求 stateful div）
         if self.log_scroll.is_none() {
@@ -264,18 +266,24 @@ impl PiShell {
         // 依据 ScrollHandle 的 offset / max_offset / bounds 计算 thumb 位置与高度。
         let (thumb_top, thumb_h, scrollable) = scrollbar_geometry(&scroll);
 
-        div()
+        // 布局修复（变体实验 D 实测）：GPUI 0.2 (taffy) 纵向 flex 中 flex_1 子项
+        // 会被内容 min-content 撑爆（min_h(0)/flex_basis(0) 均无法压制），导致滚动
+        // 容器高度 == 内容高度、永不溢出（max_off=0）——滚轮/拖动/滚动条全部失灵
+        // 的最底层根因。改为显式高度链：wrap 用 absolute 铺满 header(48px) 以下
+        // 区域（有 definite 高度），stream 用 h_full + flex_none 显式占满 wrap。
+        let wrap = div()
             .id("pi-log-stream-wrap")
-            .relative()
-            .flex_col()
-            .flex_1()
-            .min_h(px(0.0))
-            .child(
+            .absolute()
+            .top(px(layout::LOG_PANEL_HEADER_HEIGHT))
+            .bottom_0()
+            .left_0()
+            .right_0();
+        wrap.child(
                 div()
                     .id("pi-log-stream")
                     .flex_col()
-                    .flex_1()
-                    .min_h(px(0.0))
+                    .h_full()
+                    .flex_none()
                     .overflow_y_scroll()
                     .scrollbar_width(px(0.0))
                     .pr(px(6.0))
@@ -303,8 +311,9 @@ impl PiShell {
                     })
                     .children(rows),
             )
-            // 自绘滚动条（track + thumb；thumb 可拖）
-            .when(row_count > 3, |s| {
+            // 自绘滚动条（track + thumb；thumb 可拖）。仅内容超高可滚时显示，
+            // 避免无可滚内容仍留残条。
+            .when(scrollable, |s| {
                 let pal_ref = *pal;
                 s.child(
                     div()
@@ -357,20 +366,15 @@ impl PiShell {
 }
 
 /// 由 ScrollHandle 计算自绘滚动条 thumb 几何（GPUI Windows 无系统滚动条绘制）
+///
+/// GPUI 0.2 语义（实测 probe 确认）：
+///   - max_offset() = (内容高 - 视口高).max(0)，**恒为 ≥0 的正可滚动量**；
+///   - offset().y ∈ [-max_offset, 0]（下滚为负）。
+/// 历史缺陷：旧实现把 max_offset 误当负数（max_off < 0 才可滚），导致 max_offset
+/// 恒正时 thumb 几何恒 (0,0,false)、拖动换算在早退处直接 return —— 滚动条失灵根因。
 fn scrollbar_geometry(scroll: &gpui::ScrollHandle) -> (f32, f32, bool) {
     let viewport = f32::from(scroll.bounds().size.height);
-    let max_off = f32::from(scroll.max_offset().height); // 负值：可向上滚动的量
-    if viewport <= 0.0 || max_off >= 0.0 {
-        return (0.0, 0.0, false);
-    }
-    let content = viewport + max_off.abs();
-    let track = viewport;
-    let thumb_h = (track * (viewport / content)).clamp(24.0, track);
-    let ratio = if max_off.abs() > 0.0 {
-        (-f32::from(scroll.offset().y)) / max_off.abs()
-    } else {
-        0.0
-    };
-    let thumb_top = (track - thumb_h) * ratio;
-    (thumb_top, thumb_h, true)
+    let max_off = f32::from(scroll.max_offset().height); // 正数：可滚动量
+    let offset_y = f32::from(scroll.offset().y);
+    super::scroll_math::thumb_geometry(viewport, max_off, offset_y)
 }

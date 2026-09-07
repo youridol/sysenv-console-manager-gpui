@@ -5,11 +5,15 @@
 // （切换/激活计划/异类策略/导入卓越）在后台线程执行，完成后后台重读回填；
 // 主线程仅渲染当前状态。写操作互斥防并发。
 
-use gpui::{div, px, rgb, SharedString, Window, Context, Render, WeakEntity};
+use gpui::{div, px, SharedString, Window, Context, Render, WeakEntity};
 use gpui::prelude::*;
 use secm_core::settings::{self, HeteroPolicies, PowerPlan, SettingState};
 
-use crate::theme::Theme;
+use crate::pi_clone::theme::{Appearance, Palette};
+use crate::ui::page::{
+    banner, button_sm, card, card_divider, card_header, page_header, page_root, BannerKind,
+    ButtonKind,
+};
 
 /// 可切换设置项（枚举明确区分调用函数）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +76,10 @@ struct AllSettings {
 }
 
 pub struct SettingsView {
+    /// 页面外观，随壳主题联动
+    appearance: Appearance,
+    /// 页面滚动状态（GPUI 0.2 滚轮需 track_scroll 手动驱动，见 ui::page::page_root）
+    page_scroll: gpui::ScrollHandle,
     /// 开关状态列表
     toggles: Vec<(ToggleKind, SettingState)>,
     /// 电源计划列表
@@ -89,9 +97,11 @@ pub struct SettingsView {
 }
 
 impl SettingsView {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(appearance: Appearance, cx: &mut Context<Self>) -> Self {
         log::info!("系统设置 · 页面已打开");
         let mut v = Self {
+            appearance,
+            page_scroll: gpui::ScrollHandle::new(),
             toggles: Vec::new(),
             plans: Vec::new(),
             hetero: None,
@@ -102,6 +112,17 @@ impl SettingsView {
         };
         v.start_load(cx);
         v
+    }
+
+    /// 当前页面色板（明暗随壳联动）
+    fn pal(&self) -> Palette {
+        Palette::for_appearance(self.appearance)
+    }
+
+    /// 壳切换主题时同步外观（PiShell::toggle_theme 联动调用）
+    pub(crate) fn set_appearance(&mut self, appearance: Appearance, cx: &mut Context<Self>) {
+        self.appearance = appearance;
+        cx.notify();
     }
 
     /// 后台加载全部状态（开关/电源计划/异类策略）
@@ -381,162 +402,90 @@ impl SettingsView {
 
 impl Render for SettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::dark();
+        let pal = self.pal();
         let status = self.status.clone();
 
-        div()
-            .id("settings-page-root")
-            .flex_col()
-            .size_full()
-            .p_6()
-            .gap_4()
-            // 内容超高时整页纵向滚动（v2.4.1：修复内容超高被外层裁切）
-            .overflow_y_scroll()
-            // 页头
+        // 根容器：统一页面骨架（内边距/纵向节奏/超高滚动/页面底色）
+        page_root(&pal, "settings-page-root", &self.page_scroll, &cx.entity())
+            // 页头：左标题 + 副标题
+            .child(page_header(
+                &pal,
+                "系统设置",
+                "系统优化开关 · 电源计划 · 异类调度策略",
+            ))
+            // 开关卡：统一卡片骨架（标题 + 分隔线 + 开关行）
             .child(
-                div()
-                    .flex()
-                    .items_baseline()
-                    .justify_between()
-                    .child(
-                        div()
-                            .flex()
-                            .items_baseline()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .text_size(px(24.0))
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(theme.text)
-                                    .child("系统设置"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .text_color(theme.text_muted)
-                                    .child("系统优化开关 · 电源计划 · 异类调度策略"),
-                            ),
-                    ),
-            )
-            // 开关组
-            .child(
-                div()
-                    .flex_col()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.panel)
-                    .children(
-                        self.toggles
-                            .iter()
-                            .enumerate()
-                            .map(|(i, (kind, state))| {
-                                let k = *kind;
-                                let enabled = state.enabled;
-                                let msg = state.message.clone();
-                                let label = k.label().to_string();
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .px_5()
-                                    .py_3p5()
-                                    .when(i + 1 < self.toggles.len(), |s| {
-                                        s.border_b_1().border_color(theme.border)
-                                    })
-                                    .child(
-                                        div()
-                                            .flex_col()
-                                            .gap_1()
-                                            .child(
-                                                div()
-                                                    .text_color(theme.text)
-                                                    .text_size(px(14.0))
-                                                    .child(label),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_size(px(11.5))
-                                                    .text_color(theme.text_muted)
-                                                    .child(msg),
-                                            ),
-                                    )
-                                    .child(self.toggle_switch(&theme, k, enabled, cx))
-                            }),
-                    ),
-            )
-            // 状态消息
-            .when(!status.is_empty(), |s| {
-                s.child(
-                    div()
-                        .px_4()
-                        .py_2()
-                        .rounded_md()
-                        .bg(theme.panel_hover)
-                        .text_size(px(12.0))
-                        .text_color(theme.info)
-                        .child(status),
-                )
-            })
-            // 电源计划
-            .child(
-                div()
-                    .flex_col()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.panel)
-                    .child(
+                card(&pal)
+                    .child(card_header(&pal, "系统优化开关"))
+                    .child(card_divider(&pal))
+                    .children(self.toggles.iter().enumerate().map(|(i, (kind, state))| {
+                        let k = *kind;
+                        let enabled = state.enabled;
+                        let msg = state.message.clone();
+                        let label = k.label().to_string();
+                        // 开关行：左侧标题/说明，右侧圆钮开关（行间分隔线）
                         div()
                             .flex()
                             .items_center()
                             .justify_between()
                             .px_5()
-                            .py_3()
+                            .py_3p5()
+                            .when(i + 1 < self.toggles.len(), |s| {
+                                s.border_b_1().border_color(pal.border)
+                            })
                             .child(
                                 div()
-                                    .text_size(px(14.0))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(theme.text)
-                                    .child("电源计划"),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
+                                    .flex_col()
+                                    .gap_1()
                                     .child(
                                         div()
-                                            .id("import-ultimate")
-                                            .px_3()
-                                            .py_1()
-                                            .rounded_md()
-                                            .cursor_pointer()
-                                            .bg(theme.panel_hover)
-                                            .hover(|s| s.bg(theme.border))
-                                            .text_color(theme.text)
-                                            .text_size(px(11.5))
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.import_ultimate(cx);
-                                            }))
-                                            .child("导入卓越性能计划"),
+                                            .text_color(pal.text)
+                                            .text_size(px(14.0))
+                                            .child(label),
                                     )
-                                    .when(!self.ultimate_msg.is_empty(), |s| {
-                                        let m = self.ultimate_msg.clone();
-                                        s.child(
-                                            div()
-                                                .text_size(px(10.5))
-                                                .text_color(theme.text_muted)
-                                                .child(m),
-                                        )
-                                    }),
-                            ),
+                                    .child(
+                                        div()
+                                            .text_size(px(11.5))
+                                            .text_color(pal.text_muted)
+                                            .child(msg),
+                                    ),
+                            )
+                            .child(self.toggle_switch(&pal, k, enabled, cx))
+                    })),
+            )
+            // 状态消息（操作反馈，非空时以统一横幅展示）
+            .when(!status.is_empty(), |s| {
+                s.child(banner(&pal, BannerKind::Info, status))
+            })
+            // 电源计划卡：卡头标题自动推右，右侧为导入按钮与导入反馈
+            .child(
+                card(&pal)
+                    .child(
+                        card_header(&pal, "电源计划")
+                            .child(
+                                button_sm(&pal, ButtonKind::Secondary)
+                                    .id("import-ultimate")
+                                    .child("导入卓越性能计划")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.import_ultimate(cx);
+                                    })),
+                            )
+                            .when(!self.ultimate_msg.is_empty(), |s| {
+                                let m = self.ultimate_msg.clone();
+                                s.child(
+                                    div()
+                                        .text_size(px(10.5))
+                                        .text_color(pal.text_muted)
+                                        .child(m),
+                                )
+                            }),
                     )
                     .children(self.plans.iter().map(|p| {
                         let guid = p.guid.clone();
                         let guid8 = SharedString::from(guid.chars().take(8).collect::<String>());
                         let name = p.name.clone();
                         let active = p.is_active;
+                        // 计划行：激活计划高亮圆点，其余计划点击切换
                         div()
                             .id(guid8.clone())
                             .flex()
@@ -545,7 +494,7 @@ impl Render for SettingsView {
                             .px_5()
                             .py_2p5()
                             .cursor_pointer()
-                            .when(!active, |s| s.hover(|s| s.bg(theme.panel_hover)))
+                            .when(!active, |s| s.hover(|s| s.bg(pal.bg_hover)))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if !active {
                                     this.activate_plan(&guid, cx);
@@ -561,15 +510,15 @@ impl Render for SettingsView {
                                             div()
                                                 .size(px(7.0))
                                                 .rounded_full()
-                                                .bg(theme.success),
+                                                .bg(pal.success),
                                         )
                                     })
                                     .child(
                                         div()
                                             .text_color(if active {
-                                                theme.text
+                                                pal.text
                                             } else {
-                                                theme.text_muted
+                                                pal.text_muted
                                             })
                                             .text_size(px(13.0))
                                             .child(name),
@@ -579,9 +528,9 @@ impl Render for SettingsView {
                                 div()
                                     .text_size(px(11.0))
                                     .text_color(if active {
-                                        theme.success
+                                        pal.success
                                     } else {
-                                        theme.text_muted
+                                        pal.text_muted
                                     })
                                     .child(if active {
                                         "当前 · 点击其余计划可切换".to_string()
@@ -597,41 +546,28 @@ impl Render for SettingsView {
                 let thread_ac = h.thread_ac;
                 let short_ac = h.short_ac;
                 s.child(
-                    div()
-                        .flex_col()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(theme.border)
-                        .bg(theme.panel)
-                        .child(
-                            div()
-                                .px_5()
-                                .py_3()
-                                .text_size(px(14.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(theme.text)
-                                .child("异类线程调度策略"),
-                        )
+                    card(&pal)
+                        .child(card_header(&pal, "异类线程调度策略"))
                         .when(!supported, |s| {
                             s.child(
                                 div()
                                     .px_5()
                                     .py_3()
                                     .text_size(px(12.0))
-                                    .text_color(theme.text_muted)
+                                    .text_color(pal.text_muted)
                                     .child("当前 CPU 不支持（非混合架构）"),
                             )
                         })
                         .when(supported, |s| {
                             s.child(hetero_section_row(
-                                &theme,
+                                &pal,
                                 "线程调度策略",
                                 thread_ac,
                                 "thread",
                                 cx,
                             ))
                             .child(hetero_section_row(
-                                &theme,
+                                &pal,
                                 "短运行线程调度策略",
                                 short_ac,
                                 "short",
@@ -645,7 +581,7 @@ impl Render for SettingsView {
 
 /// 异类策略选择行（6 档按钮组，当前值高亮）
 fn hetero_section_row(
-    theme: &Theme,
+    pal: &Palette,
     title: &str,
     current: Option<u32>,
     kind: &'static str,
@@ -658,16 +594,17 @@ fn hetero_section_row(
         .px_5()
         .py_3()
         .border_t_1()
-        .border_color(theme.border)
+        .border_color(pal.border)
         .child(
             div()
                 .text_size(px(12.0))
                 .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(theme.text)
+                .text_color(pal.text)
                 .child(title),
         )
         .child(
             div()
+                .mt_1p5()
                 .flex()
                 .flex_wrap()
                 .gap_1p5()
@@ -682,13 +619,14 @@ fn hetero_section_row(
                         .py_1()
                         .rounded_md()
                         .cursor_pointer()
+                        // 选中档：accent 实底 + 对比色字；未选档：hover 底 + 悬停加深
                         .when(is_cur, |s| {
-                            s.bg(theme.brand).text_color(rgb(0xffffff))
+                            s.bg(pal.accent).text_color(pal.accent_contrast)
                         })
                         .when(!is_cur, |s| {
-                            s.bg(theme.panel_hover)
-                                .hover(|s| s.bg(theme.border))
-                                .text_color(theme.text)
+                            s.bg(pal.bg_hover)
+                                .hover(|s| s.bg(pal.bg_selected))
+                                .text_color(pal.text)
                         })
                         .text_size(px(11.5))
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -702,10 +640,10 @@ fn hetero_section_row(
 }
 
 impl SettingsView {
-    /// 开关控件（圆钮式：开=品牌色，关=灰；点击切换）
+    /// 开关控件（圆钮式：开=accent 底对比色钮，关=hover 底弱化钮；点击切换）
     fn toggle_switch(
         &self,
-        theme: &Theme,
+        pal: &Palette,
         kind: ToggleKind,
         enabled: bool,
         cx: &mut Context<Self>,
@@ -723,8 +661,8 @@ impl SettingsView {
             .h(px(24.0))
             .rounded_full()
             .cursor_pointer()
-            .when(enabled, |s| s.bg(theme.brand))
-            .when(!enabled, |s| s.bg(theme.panel_hover))
+            .when(enabled, |s| s.bg(pal.accent))
+            .when(!enabled, |s| s.bg(pal.bg_hover))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.toggle(kind, cx);
             }))
@@ -734,9 +672,11 @@ impl SettingsView {
                     .top(px(2.0))
                     .size(px(20.0))
                     .rounded_full()
-                    .bg(rgb(0xffffff))
-                    .when(enabled, |s| s.right(px(2.0)))
-                    .when(!enabled, |s| s.left(px(2.0))),
+                    // 开：圆钮右移取对比色；关：圆钮左移取弱化色
+                    .when(enabled, |s| {
+                        s.bg(pal.accent_contrast).right(px(2.0))
+                    })
+                    .when(!enabled, |s| s.bg(pal.text_muted).left(px(2.0))),
             )
     }
 }
