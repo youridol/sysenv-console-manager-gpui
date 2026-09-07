@@ -1,8 +1,10 @@
-//! 磁盘 IO 读写速度（PDH 性能计数器）— 每卷独立 MB/s
+//! 磁盘 IO 读写速度 + 活动时间（PDH 性能计数器）— 每卷独立 MB/s / %
 //!
 //! 数据源：pdh.dll 的 `\PhysicalDisk(*)\Disk Read Bytes/sec` /
-//! `\PhysicalDisk(*)\Disk Write Bytes/sec` 通配符计数器（Windows 标准性能
-//! 计数器，任务管理器同源，普通用户可读，无需管理员权限 / 内核驱动）。
+//! `\PhysicalDisk(*)\Disk Write Bytes/sec` / `\PhysicalDisk(*)\% Disk Time`
+//! 通配符计数器（Windows 标准性能计数器，任务管理器同源，普通用户可读，
+//! 无需管理员权限 / 内核驱动）。
+//! `% Disk Time` = LiteMonitor DISK.Activity 主路径（PhysicalDisk\% Disk Time）。
 //!
 //! 实例语义：PDH 的 PhysicalDisk 按「卷」提供实例，实例名形如 `0 C:`、
 //! `1 D:`（物理盘号 + 盘符）。`PdhGetFormattedCounterArrayW` 返回全部实例的
@@ -37,14 +39,26 @@ const PDH_MORE_DATA: u32 = 0x8000_07D2;
 /// 通配符计数器路径（`*` 展开为全部卷实例）
 const COUNTER_READ: &str = r"\PhysicalDisk(*)\Disk Read Bytes/sec";
 const COUNTER_WRITE: &str = r"\PhysicalDisk(*)\Disk Write Bytes/sec";
+/// 磁盘活动时间 %（LiteMonitor DISK.Activity 等价）
+const COUNTER_ACTIVE: &str = r"\PhysicalDisk(*)\% Disk Time";
+
+/// 单卷磁盘 IO 采样（读 MB/s + 写 MB/s + 活动时间 %）
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct DiskIoSample {
+    pub read_mbps: f32,
+    pub write_mbps: f32,
+    /// % Disk Time（0-100+；% Disk Time 可 >100 多队列盘，截断语义由消费端定）
+    pub activity_pct: f32,
+}
 
 /// PDH 查询状态（进程级单例；查询句柄生命周期 = 进程生命周期，退出由 OS 回收）
 struct PdhState {
     query: isize,
     read_counter: isize,
     write_counter: isize,
-    /// 上次成功读取：卷盘符（"C:" 大写）→ (读 MB/s, 写 MB/s)；间隔不足时沿用
-    speed_map: HashMap<String, (f32, f32)>,
+    active_counter: isize,
+    /// 上次成功读取：卷盘符（"C:" 大写）→ 采样；间隔不足时沿用
+    sample_map: HashMap<String, DiskIoSample>,
     /// 初始化失败标记（计数器不存在等）——失败后不再重试
     failed: bool,
 }
@@ -56,9 +70,9 @@ fn to_utf16(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
 
-/// 初始化 PDH 查询（打开查询 + 添加读写通配计数器 + 建立首次采样基线）。
+/// 初始化 PDH 查询（打开查询 + 添加读写/活动通配计数器 + 建立首次采样基线）。
 ///
-/// 计数器不存在（无物理磁盘/虚拟机）时返回 Err，调用方标记不可用。
+/// 读写计数器不存在（无物理磁盘/虚拟机）时返回 Err；`% Disk Time` 缺失不阻断主功能。
 fn pdh_init() -> Result<PdhState, String> {
     // 0.61 起 PDH 句柄为 *mut c_void；结构体存 isize（保证 Mutex 静态可用 Send），
     // FFI 边界处相互转换
@@ -70,12 +84,17 @@ fn pdh_init() -> Result<PdhState, String> {
     }
     let read_path = to_utf16(COUNTER_READ);
     let write_path = to_utf16(COUNTER_WRITE);
+    let active_path = to_utf16(COUNTER_ACTIVE);
     let mut read_counter: PDH_HCOUNTER = std::ptr::null_mut();
     let mut write_counter: PDH_HCOUNTER = std::ptr::null_mut();
+    let mut active_counter: PDH_HCOUNTER = std::ptr::null_mut();
     // SAFETY: 计数器路径为 NUL 结尾 UTF-16；句柄由 API 写入
     let rc_read = unsafe { PdhAddEnglishCounterW(query, read_path.as_ptr(), 0, &mut read_counter) };
     let rc_write =
         unsafe { PdhAddEnglishCounterW(query, write_path.as_ptr(), 0, &mut write_counter) };
+    // % Disk Time 缺失（精简系统）不阻断读写速率主功能
+    let rc_active =
+        unsafe { PdhAddEnglishCounterW(query, active_path.as_ptr(), 0, &mut active_counter) };
     if rc_read != 0 || rc_write != 0 {
         // SAFETY: query 为 PdhOpenQueryW 返回的有效句柄
         unsafe { PdhCloseQuery(query) };
@@ -91,7 +110,12 @@ fn pdh_init() -> Result<PdhState, String> {
         query: query as isize,
         read_counter: read_counter as isize,
         write_counter: write_counter as isize,
-        speed_map: HashMap::new(),
+        active_counter: if rc_active == 0 {
+            active_counter as isize
+        } else {
+            0
+        },
+        sample_map: HashMap::new(),
         failed: false,
     })
 }
@@ -167,21 +191,20 @@ fn read_counter_array_mbps(counter: isize) -> HashMap<String, f32> {
             String::from_utf16_lossy(std::slice::from_raw_parts(item.szName, end))
         };
         // 实例名形如 "0 C:"（盘号 + 盘符）；提取字母开头的盘符 token
-        if let Some(drive) = name
-            .split_whitespace()
-            .find(|t| t.len() == 2 && t.as_bytes()[1] == b':' && t.as_bytes()[0].is_ascii_alphabetic())
-        {
+        if let Some(drive) = name.split_whitespace().find(|t| {
+            t.len() == 2 && t.as_bytes()[1] == b':' && t.as_bytes()[0].is_ascii_alphabetic()
+        }) {
             map.insert(drive.to_ascii_uppercase(), (bps / 1024.0 / 1024.0) as f32);
         }
     }
     map
 }
 
-/// 获取各卷磁盘 IO 速度（键为盘符 "C:" 形式，大写）。
+/// 获取各卷磁盘 IO 速度与活动时间（键为盘符 "C:" 形式，大写）。
 ///
-/// 返回 盘符 → (读 MB/s, 写 MB/s)；通道不可用/初始化失败时返回空映射
-/// （降级不中断，调用方按盘符匹配不到即为 0）。
-pub fn get_disk_io_speed_map() -> HashMap<String, (f32, f32)> {
+/// 返回 盘符 → DiskIoSample{read/write MB/s, activity %}；通道不可用/初始化失败时
+/// 返回空映射（降级不中断，调用方按盘符匹配不到即为不可用）。
+pub fn get_disk_io_sample_map() -> HashMap<String, DiskIoSample> {
     let mut guard = match PDH_STATE.lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
@@ -197,21 +220,50 @@ pub fn get_disk_io_speed_map() -> HashMap<String, (f32, f32)> {
         unsafe { PdhCollectQueryData(s.query as PDH_HQUERY) };
         let reads = read_counter_array_mbps(s.read_counter);
         let writes = read_counter_array_mbps(s.write_counter);
-        // 按实例名合并读/写
-        let mut next: HashMap<String, (f32, f32)> = HashMap::new();
+        let actives = if s.active_counter != 0 {
+            read_counter_array_mbps(s.active_counter)
+        } else {
+            HashMap::new()
+        };
+        // 按实例名合并读/写/活动
+        let mut next: HashMap<String, DiskIoSample> = HashMap::new();
         for (drive, r) in reads {
             let w = writes.get(&drive).copied().unwrap_or(0.0);
-            next.insert(drive, (r, w));
+            let a = actives.get(&drive).copied().unwrap_or(0.0);
+            next.insert(
+                drive,
+                DiskIoSample {
+                    read_mbps: r,
+                    write_mbps: w,
+                    activity_pct: a,
+                },
+            );
         }
         for (drive, w) in writes {
-            next.entry(drive).or_insert((0.0, w));
+            let a = actives.get(&drive).copied().unwrap_or(0.0);
+            next.entry(drive)
+                .and_modify(|s| s.write_mbps = w)
+                .or_insert(DiskIoSample {
+                    read_mbps: 0.0,
+                    write_mbps: w,
+                    activity_pct: a,
+                });
+        }
+        for (drive, a) in actives {
+            next.entry(drive)
+                .and_modify(|s| s.activity_pct = a)
+                .or_insert(DiskIoSample {
+                    read_mbps: 0.0,
+                    write_mbps: 0.0,
+                    activity_pct: a,
+                });
         }
         // 本次无有效数据的实例沿用上次值（间隔不足场景）
-        for (drive, (r, w)) in &s.speed_map {
-            next.entry(drive.clone()).or_insert((*r, *w));
+        for (drive, prev) in &s.sample_map {
+            next.entry(drive.clone()).or_insert(*prev);
         }
-        s.speed_map = next;
-        return s.speed_map.clone();
+        s.sample_map = next;
+        return s.sample_map.clone();
     }
     // 首次调用：初始化
     match pdh_init() {
@@ -220,12 +272,13 @@ pub fn get_disk_io_speed_map() -> HashMap<String, (f32, f32)> {
             HashMap::new()
         }
         Err(e) => {
-            eprintln!("[disk_io] PDH 初始化失败（磁盘 IO 速度降级为 0）: {e}");
+            log::warn!("[disk_io] PDH 初始化失败（磁盘 IO 采样降级为不可用）: {e}");
             *guard = Some(PdhState {
                 query: 0,
                 read_counter: 0,
                 write_counter: 0,
-                speed_map: HashMap::new(),
+                active_counter: 0,
+                sample_map: HashMap::new(),
                 failed: true,
             });
             HashMap::new()
@@ -240,18 +293,33 @@ mod tests {
     /// 真机验证（默认忽略；PDH 通道真实采样，无需管理员）：
     /// 首次调用建立基线（空映射），间隔 >1s 后的调用应返回非空实例映射，
     /// 且每个值均为非负有限速率（磁盘空闲时为 0）。
-    /// 运行：`cargo test -p secm-datasource -- --ignored real_machine_disk_io_speed_map`
+    /// 运行：`cargo test -p secm-datasource -- --ignored real_machine_disk_io_sample_map`
     #[test]
     #[ignore]
-    fn real_machine_disk_io_speed_map() {
-        let m1 = get_disk_io_speed_map();
+    fn real_machine_disk_io_sample_map() {
+        let m1 = get_disk_io_sample_map();
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        let m2 = get_disk_io_speed_map();
-        eprintln!("[真机] disk_io 首调实例数={} 次调实例数={}", m1.len(), m2.len());
-        for (drive, (r, w)) in &m2 {
-            eprintln!("[真机] disk_io {drive}: read={r:.2} write={w:.2} MB/s");
-            assert!(r.is_finite() && *r >= 0.0, "读速度非法: {}", r);
-            assert!(w.is_finite() && *w >= 0.0, "写速度非法: {}", w);
+        let m2 = get_disk_io_sample_map();
+        eprintln!(
+            "[真机] disk_io 首调实例数={} 次调实例数={}",
+            m1.len(),
+            m2.len()
+        );
+        for (drive, s) in &m2 {
+            eprintln!(
+                "[真机] disk_io {drive}: read={:.2} write={:.2} MB/s activity={:.1}%",
+                s.read_mbps, s.write_mbps, s.activity_pct
+            );
+            assert!(
+                s.read_mbps.is_finite() && s.read_mbps >= 0.0,
+                "读速度非法: {}",
+                s.read_mbps
+            );
+            assert!(
+                s.write_mbps.is_finite() && s.write_mbps >= 0.0,
+                "写速度非法: {}",
+                s.write_mbps
+            );
             // 盘符键格式校验："C:" 形式
             assert_eq!(drive.len(), 2, "盘符键格式非法: {}", drive);
         }

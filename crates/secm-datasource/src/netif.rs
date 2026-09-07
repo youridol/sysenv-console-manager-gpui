@@ -10,8 +10,9 @@ use crate::error::CollectError;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
-    FreeMibTable, GetAdaptersAddresses, GetIfTable2, GAA_FLAG_INCLUDE_GATEWAYS,
-    GAA_FLAG_INCLUDE_PREFIX, IP_ADAPTER_ADDRESSES_LH, MIB_IF_TABLE2,
+    FreeMibTable, GetAdaptersAddresses, GetExtendedTcpTable, GetIfTable2,
+    GAA_FLAG_INCLUDE_GATEWAYS, GAA_FLAG_INCLUDE_PREFIX, IP_ADAPTER_ADDRESSES_LH, MIB_IF_TABLE2,
+    MIB_TCPTABLE, MIB_TCP_STATE_ESTAB, TCP_TABLE_BASIC_ALL,
 };
 use windows_sys::Win32::Networking::WinSock::{
     AF_INET, AF_INET6, AF_UNSPEC, SOCKADDR, SOCKADDR_IN, SOCKADDR_IN6,
@@ -165,6 +166,65 @@ pub fn if_bytes_map() -> HashMap<String, (u64, u64)> {
     }
 
     map
+}
+
+// ============================================================================
+// 活跃 TCP 连接数（GetExtendedTcpTable；自 net_io.rs 迁入 — ADR-0006 网络域统一）
+// ============================================================================
+
+/// 统计当前活跃（ESTABLISHED）TCP 连接数（IPv4，GetExtendedTcpTable 全表统计）。
+///
+/// 「活跃 TCP 连接数」= 处于 MIB_TCP_STATE_ESTAB 状态的 IPv4 连接条目数
+/// （资源监视器「网络 → TCP 连接」同源语义）。失败时返回 0（纯计数指标，
+/// 轮询 UI 展示 0，下一 tick 自动重试，不中断采样循环）。
+/// 同步阻塞微秒级；调用方须在后台线程执行（S8）。
+pub fn tcp_connection_count() -> u32 {
+    let mut size: u32 = 0;
+    // SAFETY: 首次探测缓冲大小（table 传 NULL，返回 ERROR_INSUFFICIENT_BUFFER 并填充 size）
+    let rc = unsafe {
+        GetExtendedTcpTable(
+            std::ptr::null_mut(),
+            &mut size,
+            0,
+            AF_INET as u32,
+            TCP_TABLE_BASIC_ALL,
+            0,
+        )
+    };
+    if rc == 0 || size == 0 {
+        return 0;
+    }
+    // u32 字对齐缓冲（MIB_TCPTABLE 含 u32 字段，u8 缓冲不保证对齐）
+    let words = (size as usize).div_ceil(4);
+    let mut buf: Vec<u32> = vec![0u32; words];
+    let mut out_size: u32 = (words * 4) as u32;
+    // SAFETY: buf 为 u32 对齐输出缓冲，容量以字节数传入；API 填充 MIB_TCPTABLE
+    let rc = unsafe {
+        GetExtendedTcpTable(
+            buf.as_mut_ptr() as *mut core::ffi::c_void,
+            &mut out_size,
+            0,
+            AF_INET as u32,
+            TCP_TABLE_BASIC_ALL,
+            0,
+        )
+    };
+    if rc != 0 {
+        return 0;
+    }
+    // SAFETY: API 已按 MIB_TCPTABLE 布局（repr(C)：dwNumEntries + table[]）填充
+    let table = unsafe { &*(buf.as_ptr() as *const MIB_TCPTABLE) };
+    let mut count = 0u32;
+    for i in 0..table.dwNumEntries {
+        // SAFETY: table 为 [MIB_TCPROW_LH; 1] 惯用技巧，按索引步进 < dwNumEntries
+        let row = unsafe { &*table.table.as_ptr().add(i as usize) };
+        // SAFETY: union 读取 dwState（与 State 变体同存储，布局等价）
+        let st = unsafe { row.Anonymous.dwState };
+        if st == MIB_TCP_STATE_ESTAB as u32 {
+            count += 1;
+        }
+    }
+    count
 }
 
 // ============================================================================
@@ -424,7 +484,8 @@ pub fn adapter_configs() -> Result<Vec<AdapterConfig>, CollectError> {
                     if family == AF_INET {
                         cfg.ipv4.push(ip);
                         // 前缀长度 → 子网掩码（与 IP 一一对应）
-                        cfg.ipv4_mask.push(prefix_len_to_mask(addr.OnLinkPrefixLength).to_string());
+                        cfg.ipv4_mask
+                            .push(prefix_len_to_mask(addr.OnLinkPrefixLength).to_string());
                     } else if family == AF_INET6 {
                         // 仅采集链路本地（fe80::/10，任务契约"连接-本地IPv6地址"）
                         if is_link_local_v6_str(&ip) {
@@ -605,9 +666,14 @@ mod tests {
             // 核心部分形如 "1 G" / "100 M" / "500"
             let parts: Vec<&str> = core.split(' ').collect();
             let num_ok = parts[0].parse::<f64>().is_ok();
-            let unit_ok = parts.len() == 1
-                || (parts.len() == 2 && matches!(parts[1], "G" | "M" | "K"));
-            assert!(valid && num_ok && unit_ok, "速度格式非法: {} (bps={})", s, bps);
+            let unit_ok =
+                parts.len() == 1 || (parts.len() == 2 && matches!(parts[1], "G" | "M" | "K"));
+            assert!(
+                valid && num_ok && unit_ok,
+                "速度格式非法: {} (bps={})",
+                s,
+                bps
+            );
         }
     }
 
@@ -666,7 +732,12 @@ mod tests {
                     assert!(!c.name.is_empty(), "适配器名称不应为空");
                     assert!(c.status == "Up" || c.status == "Down");
                     // 掩码与 IPv4 地址一一对应
-                    assert_eq!(c.ipv4.len(), c.ipv4_mask.len(), "掩码应与 IPv4 一一对应: {:?}", c.name);
+                    assert_eq!(
+                        c.ipv4.len(),
+                        c.ipv4_mask.len(),
+                        "掩码应与 IPv4 一一对应: {:?}",
+                        c.name
+                    );
                     for m in &c.ipv4_mask {
                         assert!(m.parse::<Ipv4Addr>().is_ok(), "掩码非法: {}", m);
                     }
@@ -676,7 +747,9 @@ mod tests {
                     }
                 }
                 // 至少一个接口具备 IPv4 或链路本地 IPv6（实机正常网络环境）
-                let has_ip = configs.iter().any(|c| !c.ipv4.is_empty() || !c.ipv6_link_local.is_empty());
+                let has_ip = configs
+                    .iter()
+                    .any(|c| !c.ipv4.is_empty() || !c.ipv6_link_local.is_empty());
                 assert!(has_ip, "应至少有一个接口含 IP 地址");
                 // 至少一个接口带 GUID（MAC 修改前置条件）
                 let has_guid = configs.iter().any(|c| c.guid.is_some());

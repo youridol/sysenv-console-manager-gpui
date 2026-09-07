@@ -11,7 +11,8 @@
 //! - [`dns`]：DNS 缓存刷新（P13，dnsapi；由 secm-core::cleanup 调用）
 //! - [`activation`]：Windows 激活状态（P1，注册表近似 + LicenseStatus 映射表）
 //! - [`cpu_freq`]：CPU 频率降级链（NtAPI/PDH/注册表；由 secm-core::sensor_service 消费）
-//! - [`disk`] / [`disk_io`]：磁盘枚举/SMART + 卷 IO 速率（PDH）
+//! - [`cpu_load`]：CPU 总负载（PDH % Processor Utility→% Processor Time；LiteMonitor 等价链）
+//! - [`disk`] / [`disk_io`]：磁盘枚举/SMART + 卷 IO 速率/活动时间（PDH）
 //! - [`error`]：统一错误模型 `CollectError`
 //!
 //! 依赖方向：本 crate 是叶子模块，仅依赖 windows-sys / winreg / wmi / serde；
@@ -27,11 +28,11 @@
 
 pub mod activation;
 pub mod cpu_freq;
-pub mod dns;
+pub mod cpu_load;
 pub mod disk;
 pub mod disk_io;
+pub mod dns;
 pub mod error;
-pub mod net_io;
 pub mod netif;
 pub mod power;
 pub mod registry;

@@ -2,6 +2,9 @@
 //!
 //! 替换 `powercfg /setactive` / `/setacvalueindex` / `/setdcvalueindex` / `/s` / `/duplicatescheme`。
 //!
+//! 另含电源状态采集（ADR-0004：AC.Status，LiteMonitor SystemInformation.PowerStatus
+//! 等价 Win32 API —— GetSystemPowerStatus）。
+//!
 //! 线程模型：写操作秒级完成，上层须在 `spawn_blocking` 中调用（S8）。
 
 use crate::error::CollectError;
@@ -28,14 +31,12 @@ fn guid_from_str(s: &str) -> Result<windows_sys::core::GUID, CollectError> {
         ));
     }
     let u32_parse = |h: &str| -> Result<u32, CollectError> {
-        u32::from_str_radix(h, 16).map_err(|e| {
-            CollectError::parse("电源计划 GUID", format!("解析 '{}' 失败: {}", h, e))
-        })
+        u32::from_str_radix(h, 16)
+            .map_err(|e| CollectError::parse("电源计划 GUID", format!("解析 '{}' 失败: {}", h, e)))
     };
     let u16_parse = |h: &str| -> Result<u16, CollectError> {
-        u16::from_str_radix(h, 16).map_err(|e| {
-            CollectError::parse("电源计划 GUID", format!("解析 '{}' 失败: {}", h, e))
-        })
+        u16::from_str_radix(h, 16)
+            .map_err(|e| CollectError::parse("电源计划 GUID", format!("解析 '{}' 失败: {}", h, e)))
     };
 
     Ok(windows_sys::core::GUID {
@@ -164,7 +165,9 @@ pub fn write_ac_value(
 ) -> Result<(), CollectError> {
     let scheme_guid = match scheme {
         Some(s) => Some(guid_from_str(s)?),
-        None => get_active_scheme()?.map(|s| guid_from_str(&s)).transpose()?,
+        None => get_active_scheme()?
+            .map(|s| guid_from_str(&s))
+            .transpose()?,
     };
     let subgroup_guid = guid_from_str(subgroup)?;
     let setting_guid = guid_from_str(setting)?;
@@ -173,7 +176,9 @@ pub fn write_ac_value(
     let rc = unsafe {
         PowerWriteACValueIndex(
             std::ptr::null_mut::<HKEY>() as HKEY,
-            scheme_guid.as_ref().map_or(std::ptr::null(), |g| g as *const _),
+            scheme_guid
+                .as_ref()
+                .map_or(std::ptr::null(), |g| g as *const _),
             &subgroup_guid,
             &setting_guid,
             value,
@@ -198,7 +203,9 @@ pub fn write_dc_value(
 ) -> Result<(), CollectError> {
     let scheme_guid = match scheme {
         Some(s) => Some(guid_from_str(s)?),
-        None => get_active_scheme()?.map(|s| guid_from_str(&s)).transpose()?,
+        None => get_active_scheme()?
+            .map(|s| guid_from_str(&s))
+            .transpose()?,
     };
     let subgroup_guid = guid_from_str(subgroup)?;
     let setting_guid = guid_from_str(setting)?;
@@ -207,7 +214,9 @@ pub fn write_dc_value(
     let rc = unsafe {
         PowerWriteDCValueIndex(
             std::ptr::null_mut::<HKEY>() as HKEY,
-            scheme_guid.as_ref().map_or(std::ptr::null(), |g| g as *const _),
+            scheme_guid
+                .as_ref()
+                .map_or(std::ptr::null(), |g| g as *const _),
             &subgroup_guid,
             &setting_guid,
             value,
@@ -233,7 +242,9 @@ pub fn read_ac_value(
 ) -> Result<u32, CollectError> {
     let scheme_guid = match scheme {
         Some(s) => Some(guid_from_str(s)?),
-        None => get_active_scheme()?.map(|s| guid_from_str(&s)).transpose()?,
+        None => get_active_scheme()?
+            .map(|s| guid_from_str(&s))
+            .transpose()?,
     };
     let subgroup_guid = guid_from_str(subgroup)?;
     let setting_guid = guid_from_str(setting)?;
@@ -242,7 +253,9 @@ pub fn read_ac_value(
     let rc = unsafe {
         PowerReadACValueIndex(
             std::ptr::null_mut::<HKEY>() as HKEY,
-            scheme_guid.as_ref().map_or(std::ptr::null(), |g| g as *const _),
+            scheme_guid
+                .as_ref()
+                .map_or(std::ptr::null(), |g| g as *const _),
             &subgroup_guid,
             &setting_guid,
             &mut value,
@@ -266,7 +279,9 @@ pub fn read_dc_value(
 ) -> Result<u32, CollectError> {
     let scheme_guid = match scheme {
         Some(s) => Some(guid_from_str(s)?),
-        None => get_active_scheme()?.map(|s| guid_from_str(&s)).transpose()?,
+        None => get_active_scheme()?
+            .map(|s| guid_from_str(&s))
+            .transpose()?,
     };
     let subgroup_guid = guid_from_str(subgroup)?;
     let setting_guid = guid_from_str(setting)?;
@@ -275,7 +290,9 @@ pub fn read_dc_value(
     let rc = unsafe {
         PowerReadDCValueIndex(
             std::ptr::null_mut::<HKEY>() as HKEY,
-            scheme_guid.as_ref().map_or(std::ptr::null(), |g| g as *const _),
+            scheme_guid
+                .as_ref()
+                .map_or(std::ptr::null(), |g| g as *const _),
             &subgroup_guid,
             &setting_guid,
             &mut value,
@@ -297,11 +314,7 @@ pub fn duplicate_scheme(source_guid: &str) -> Result<String, CollectError> {
     let mut new_guid: *mut windows_sys::core::GUID = std::ptr::null_mut();
     // SAFETY: PowerDuplicateScheme 分配新 GUID（LocalAlloc），由 LocalFree 释放
     let rc = unsafe {
-        PowerDuplicateScheme(
-            std::ptr::null_mut::<HKEY>() as HKEY,
-            &source,
-            &mut new_guid,
-        )
+        PowerDuplicateScheme(std::ptr::null_mut::<HKEY>() as HKEY, &source, &mut new_guid)
     };
     if rc != ERROR_SUCCESS {
         return Err(CollectError::winapi_detailed(
@@ -315,6 +328,51 @@ pub fn duplicate_scheme(source_guid: &str) -> Result<String, CollectError> {
     let guid = unsafe { *new_guid };
     drop(guard); // 显式释放
     Ok(guid_to_str(&guid))
+}
+
+// ============================================================================
+// 电源状态采集（AC.Status — ADR-0004；LiteMonitor MetricUtils.GetPowerStatus 等价）
+// ============================================================================
+
+/// 电源状态快照（GetSystemPowerStatus）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PowerStatus {
+    /// 是否接通外接电源（ACLineStatus == AC_LINE_ONLINE）
+    pub ac_online: bool,
+    /// 是否正在充电（BATTERY_FLAG_CHARGING 置位）
+    pub charging: bool,
+    /// 电量百分比（0-100；255 = 未知/无电池 → None）
+    pub battery_percent: Option<u8>,
+}
+
+/// 读取电源状态（kernel32.GetSystemPowerStatus，普通用户可读）。
+///
+/// 失败（API 返回 0）返回 None——LiteMonitor 对应路径异常时沿用旧缓存，
+/// 本函数无状态，由调用方决定缓存策略。
+pub fn get_power_status() -> Option<PowerStatus> {
+    // SAFETY: SYSTEM_POWER_STATUS 为数值 POD，零值合法；API 填充后读取
+    let mut st: SYSTEM_POWER_STATUS = unsafe { std::mem::zeroed() };
+    // SAFETY: 输出指针指向有效结构
+    let ok = unsafe { GetSystemPowerStatus(&mut st) };
+    if ok == 0 {
+        log::warn!(
+            "[power] GetSystemPowerStatus failed: {}",
+            std::io::Error::last_os_error()
+        );
+        return None;
+    }
+    const AC_LINE_ONLINE: u8 = 1;
+    const BATTERY_FLAG_CHARGING: u8 = 0x08;
+    const BATTERY_PERCENTAGE_UNKNOWN: u8 = 255;
+    Some(PowerStatus {
+        ac_online: st.ACLineStatus == AC_LINE_ONLINE,
+        charging: (st.BatteryFlag & BATTERY_FLAG_CHARGING) != 0,
+        battery_percent: if st.BatteryLifePercent == BATTERY_PERCENTAGE_UNKNOWN {
+            None
+        } else {
+            Some(st.BatteryLifePercent.min(100))
+        },
+    })
 }
 
 #[cfg(test)]
@@ -392,7 +450,12 @@ mod tests {
         // 读当前方案 → 写入当前值（幂等验证）— 需管理员权限，失败时降级提示
         if let Ok(Some(active)) = get_active_scheme() {
             // 平衡方案处理器子组 AC 值，读当前值再写回
-            let result = write_ac_value(Some(&active), SUBGROUP_PROCESSOR, HETERO_THREAD_POLICY_GUID, 0);
+            let result = write_ac_value(
+                Some(&active),
+                SUBGROUP_PROCESSOR,
+                HETERO_THREAD_POLICY_GUID,
+                0,
+            );
             // 非管理员或无此项时允许 Err（NeedsAdmin / 设置不存在），但不应 panic
             if let Err(e) = result {
                 match e {
