@@ -494,9 +494,10 @@ static class Program
 
         public void VisitHardware(IHardware hardware)
         {
-            // Storage 降频：每 30 拍（~30s）Update 一次，其余拍跳过（读 LHM 缓存旧值）
+            // Storage 降频：首拍立即 Update（避免冷启动 30s 无温度），此后每 30 拍（~30s）
+            // Update 一次，其余拍跳过（读 LHM 缓存旧值）
             bool isStorage = hardware.HardwareType == HardwareType.Storage;
-            if (!isStorage || Tick % StorageIntervalTick == 0)
+            if (!isStorage || Tick == 1 || Tick % StorageIntervalTick == 0)
             {
                 hardware.Update();
             }
@@ -1007,9 +1008,14 @@ static class Program
         // SPD 型号是静态数据，仅在首次采集读取一次并缓存（不进入 1s 轮询热路径）
         if (_memorySpdName is null)
         {
-            // LHM 0.9.6 Memory 节点名称恒定 "Memory"（SPD 型号深读 SMBIOS 收益低，保留原始名，
-            // 真实值以 LHM 输出为准；未来 LHM 升级可在此填充 "DDR4-2400 2x8GB" 式汇总）
-            _memorySpdName = memory.Name;
+            // LHM 0.9.6 物理内存 SPD 型号在独立 Memory 子节点（如 "A-DATA Technology - AX5U6400..."），
+            // "Total Memory"/"Virtual Memory" 是聚合节点名。优先取真实 DIMM 节点名（LiteMonitor
+            // 未消费 SPD 明细；此处为 SECM 内存信息展示取真实型号）。
+            IHardware? spdNode = _computer?.Hardware.FirstOrDefault(h =>
+                h.HardwareType == HardwareType.Memory
+                && !h.Name.Contains("Total", StringComparison.OrdinalIgnoreCase)
+                && !h.Name.Contains("Virtual", StringComparison.OrdinalIgnoreCase));
+            _memorySpdName = spdNode?.Name ?? memory.Name;
         }
 
         var data = new MemoryData { Name = _memorySpdName };

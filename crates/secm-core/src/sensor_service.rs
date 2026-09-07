@@ -201,6 +201,19 @@ fn collect_snapshot(sys: &mut sysinfo::System) -> SensorSnapshot {
         motherboard,
         net,
         battery,
+        // LHM Storage 温度列表（按 LHM 硬件名；30s 慢速刷新）
+        storage_temps: lhm_resp
+            .as_ref()
+            .map(|r| {
+                r.storage
+                    .iter()
+                    .map(|st| crate::sensor::StorageTemp {
+                        name: st.name.clone(),
+                        temp: opt_metric(st.temp_c, now, "盘温度传感器不可用（30s 慢速刷新）"),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         diag,
     }
 }
@@ -428,8 +441,43 @@ fn collect_net(now: u64) -> NetSnapshot {
     // 链路速度（准静态；GetIfTable2 TransmitLinkSpeed）
     let speeds = secm_datasource::netif::link_speeds().unwrap_or_default();
 
+    // 虚拟/过滤层接口过滤（LiteMonitor _virtualNicKW 等价 + Windows 组件层模式——
+    // QoS 包调度器 / 过滤驱动层为同一物理卡的软件层实例，按位域 + 关键词双重剔除）
+    let is_virtual = |name: &str| -> bool {
+        let lower = name.to_ascii_lowercase();
+        const KW: [&str; 21] = [
+            "virtual",
+            "vmware",
+            "hyper-v",
+            "hyper v",
+            "vbox",
+            "loopback",
+            "tunnel",
+            "tap",
+            "tun",
+            "bluetooth",
+            "zerotier",
+            "tailscale",
+            "wan miniport",
+            "wfp ",
+            "ndis capture",
+            "qos packet scheduler",
+            "filter driver",
+            "本地连接*",
+            "wi-fi direct",
+            "npcap",
+            "6to4",
+        ];
+        KW.iter().any(|k| lower.contains(k))
+            || name.contains("LightWeight Filter")
+            || name.contains("Filter-0000")
+            || name.contains("Filter-0001")
+    };
+
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let interfaces: Vec<NetIfStat> = bytes
         .iter()
+        .filter(|(name, _)| !is_virtual(name) && seen.insert(name.to_ascii_uppercase()))
         .map(|(name, (in_oct, out_oct))| {
             let (rx, tx) = rates.get(name).copied().unwrap_or((0.0, 0.0));
             NetIfStat {
@@ -530,9 +578,14 @@ fn opt_metric_u64(v: Option<u64>, now: u64, err: &str) -> Metric<u64> {
 ///
 /// ensure_running 内部 wait_health 最长阻塞 ~10s（P1-4），故派发到独立线程执行，
 /// 不冻结 1s 采集线程；LAST 在派发时即推进，本次失败由下个 10s 窗口重试。
+/// `SECM_DISABLE_LHM=1` 时完全跳过（显式降级开关：无 sidecar 部署 / 验证环境
+/// 隔离 UAC 弹窗 / 排障），LHM 域指标按不可用处理，普通用户域不受影响。
 fn ensure_lhm_periodic() {
     use std::sync::atomic::{AtomicU64, Ordering};
     static LAST: AtomicU64 = AtomicU64::new(0);
+    if std::env::var("SECM_DISABLE_LHM").as_deref() == Ok("1") {
+        return;
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())

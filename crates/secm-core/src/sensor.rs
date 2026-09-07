@@ -292,6 +292,15 @@ pub struct BatteryData {
     pub charging: bool,
 }
 
+/// 磁盘温度快照（LHM Storage 域；name = LHM 硬件节点名，如型号）
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct StorageTemp {
+    /// 磁盘名（LHM Storage 节点名，如 "Samsung SSD 980 PRO"）
+    pub name: String,
+    /// 盘温度 ℃（30s 慢速刷新；无有效传感器 → 不可用）
+    pub temp: Metric<f32>,
+}
+
 /// 传感器全量快照（后台 1s 轮询填充；UI 各页订阅）
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SensorSnapshot {
@@ -304,6 +313,8 @@ pub struct SensorSnapshot {
     pub net: NetSnapshot,
     /// 电池域（无电池/未启用 = None）
     pub battery: Option<BatteryData>,
+    /// LHM Storage 温度列表（按 LHM 硬件名展示；DiskData.temperature 为卷侧尽力匹配）
+    pub storage_temps: Vec<StorageTemp>,
     /// 诊断串（各数据源降级原因汇总）
     pub diag: String,
 }

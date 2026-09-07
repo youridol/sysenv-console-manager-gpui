@@ -125,13 +125,20 @@ pub fn fmt_speed_bps(bps: u64) -> String {
 /// IF_TYPE_SOFTWARE_LOOPBACK（MIB_IF_ROW2.InterfaceType，回环接口类型码）
 const IF_TYPE_SOFTWARE_LOOPBACK: u32 = 24;
 
+/// InterfaceAndOperStatusFlags 位域（Windows SDK MIB_IF_ROW2 定义）：
+/// bit0=NotHardware、bit1=EndpointInterface、bit2=FilterInterface、bit3=InterfaceHardwareNotPresent
+const IF_FLAG_NOT_HARDWARE: u8 = 0x01;
+const IF_FLAG_FILTER_INTERFACE: u8 = 0x04;
+
 /// 读取各接口累计收发字节数（接口别名 → (下行累计 InOctets, 上行累计 OutOctets)）。
 ///
 /// 语义：GetIfTable2 MIB_IF_ROW2 的 64 位累计八位组计数（系统启动以来累计）。
 /// 与 `link_speeds()` 同源同键（Alias），调用方以两次快照的差值除以间隔即可自算
 /// 任意间隔的速率 —— PDH 速率计数器要求 ≥1s 采样间隔（见 net_io.rs 时序语义），
 /// 本接口无此限制，支持 0.5s 级高频轮询（硬件信息页网络流量卡使用）。
-/// 跳过回环接口与无别名接口；失败时返回空映射（S8 降级，调用方按键匹配不到即为 0）。
+/// 过滤：回环接口、FilterInterface/NotHardware 层（NDIS/WFP 过滤驱动为同一物理卡
+/// 产生多条同名实例，ADR-0006 网络域统一时按硬件标志位剔除）、无别名接口；
+/// 失败时返回空映射（S8 降级，调用方按键匹配不到即为 0）。
 pub fn if_bytes_map() -> HashMap<String, (u64, u64)> {
     let mut table_ptr: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
     // SAFETY: GetIfTable2 分配 MIB_IF_TABLE2（堆内存），成功时须 FreeMibTable 释放
@@ -153,11 +160,18 @@ pub fn if_bytes_map() -> HashMap<String, (u64, u64)> {
         if row.Type == IF_TYPE_SOFTWARE_LOOPBACK {
             continue;
         }
+        // FilterInterface / NotHardware 位域过滤：剔除 NDIS/WFP 过滤驱动层与
+        // 软件伪接口（同一物理卡会重复出现多条同名实例）
+        let flags = unsafe { row.InterfaceAndOperStatusFlags._bitfield };
+        if flags & (IF_FLAG_NOT_HARDWARE | IF_FLAG_FILTER_INTERFACE) != 0 {
+            continue;
+        }
         let alias = wide_array_to_string(&row.Alias);
         if alias.is_empty() {
             continue;
         }
-        map.insert(alias, (row.InOctets, row.OutOctets));
+        // 同别名取首个（位域过滤后剩余的多层实例按别名去重，物理计数一致）
+        map.entry(alias).or_insert((row.InOctets, row.OutOctets));
     }
 
     // SAFETY: FreeMibTable 释放 GetIfTable2 分配的内存
