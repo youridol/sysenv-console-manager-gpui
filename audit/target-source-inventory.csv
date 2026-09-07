@@ -1,0 +1,42 @@
+metric_key,category,source_file,source_api,permission,current_role,judgment,notes
+CPU.Load,cpu,secm-core/sensor_service.rs,sysinfo crate (NtQuerySystemInformation 差分 = % Processor Time 语义),USER_SAFE,唯一来源,MERGE,对齐 LiteMonitor 链：PDH % Processor Utility 主路径（=LiteMonitor 主路径）+ 现实现作 % Processor Time 回退层
+CPU.Clock,cpu,secm-datasource/cpu_freq.rs,CallNtPowerInformation + PDH % Processor Performance × ~MHz + registry,USER_SAFE,唯一来源(降级链),MERGE,PDH 层=LiteMonitor PerfCounter 等价；ntapi 为增强实时层；sysinfo 标称回退与 registry 层重复→移除 sysinfo 回退
+CPU.Temp,cpu,sidecar-lhm/Program.cs,LHM CPU Temperature (Tctl/CPU Package),REQUIRES sidecar admin+ring0,唯一来源,KEEP,=LiteMonitor LHM CPU sensors；sidecar 语义已对齐
+CPU.Power,cpu,sidecar-lhm/Program.cs,LHM CPU Power (Package),REQUIRES sidecar admin+ring0,唯一来源,KEEP,=LiteMonitor LHM CPU.Power
+CPU.Voltage,cpu,sidecar-lhm/Program.cs,LHM CPU Voltage (首个),REQUIRES sidecar admin+ring0,唯一来源,KEEP,=LiteMonitor CPU.Voltage（LiteMonitor 排除 soc/gt/sa/aux 的规则未迁移→映射阶段对齐）
+CPU.Fan,cpu,sidecar-lhm/Program.cs,LHM Motherboard/SuperIO Fan sensors,REQUIRES sidecar admin+ring0,部分来源(仅原始列表),MERGE,FanMapper 智能匹配策略(CPU.Fan/Pump/CASE.Fan)未迁移→按 LiteMonitor FanMapper 策略在快照层实现
+MEM.Total,cpu,secm-core/sensor_service.rs,sysinfo refresh_memory (GlobalMemoryStatusEx 等价),USER_SAFE,唯一来源,KEEP,=LiteMonitor GlobalMemoryStatusEx 同源
+MEM.Used,cpu,secm-core/sensor_service.rs,sysinfo refresh_memory (GlobalMemoryStatusEx 等价),USER_SAFE,唯一来源,KEEP,=LiteMonitor 计算路径 (Total-Available) 等价
+MEM.Load,cpu,secm-core/sensor_service.rs,sysinfo used/total 计算,USER_SAFE,唯一来源,KEEP,=LiteMonitor used/(used+avail) 计算等价
+MEM.SPD,cpu,sidecar-lhm/Program.cs,LHM Memory 节点名(SPD 缓存),REQUIRES sidecar admin,唯一来源(型号),KEEP,LiteMonitor 未消费 SPD 明细；sidecar 已输出 Memory.name
+GPU.Load,gpu,sidecar-lhm/Program.cs,LHM GPU Core Load,REQUIRES sidecar admin,唯一来源,KEEP,=LiteMonitor GPU.Load；unwrap_or(0.0) 默认值污染→映射阶段修复为显式不可用
+GPU.Temp,gpu,sidecar-lhm/Program.cs,LHM GPU Core 温度(max 兜底),REQUIRES sidecar admin,唯一来源,KEEP,=LiteMonitor GPU.Temp；sidecar GPU Core 匹配+max 兜底已对齐
+GPU.Clock,gpu,sidecar-lhm/Program.cs,LHM GPU Core Clock,REQUIRES sidecar admin,唯一来源,KEEP,=LiteMonitor GPU.Clock（LiteMonitor 熔断>6000MHz 策略未迁移）
+GPU.Power,gpu,sidecar-lhm/Program.cs,LHM GPU Power,REQUIRES sidecar admin,唯一来源,KEEP,=LiteMonitor GPU.Power（LiteMonitor 熔断>1200W 策略未迁移）
+GPU.VRAM,gpu,sidecar-lhm/Program.cs,LHM GPU Memory Used/Total (SmallData MB→bytes),REQUIRES sidecar admin,唯一来源,KEEP,=LiteMonitor GPU.VRAM；LiteMonitor 核显 Shared 优先规则未迁移→sidecar 仅匹配 GPU Memory Used/Total（Vendor 语义）
+GPU.Fan,gpu,sidecar-lhm/Program.cs,LHM GPU 首个 Fan sensor,REQUIRES sidecar admin,唯一来源,KEEP,=LiteMonitor GPU.Fan
+MOBO.Temps,motherboard,sidecar-lhm/Program.cs,LHM Motherboard+SuperIO Temperature 全列表,REQUIRES sidecar admin+ring0,唯一来源(列表),KEEP,=LiteMonitor candidatesMoboTemps；MOBO.Temp 智能策略(System>Motherboard>Chipset>合理范围最大)未迁移→快照层实现
+MOBO.Fans,motherboard,sidecar-lhm/Program.cs,LHM Motherboard+SuperIO Fan 全列表,REQUIRES sidecar admin+ring0,唯一来源(列表),KEEP,=LiteMonitor；FanMapper 匹配未迁移
+MOBO.Voltages,motherboard,sidecar-lhm/Program.cs,LHM Motherboard+SuperIO Voltage 全列表,REQUIRES sidecar admin+ring0,唯一来源(列表),KEEP,=LiteMonitor；LiteMonitor 无主板电压标准键(未消费)→仅透传列表
+DISK.Read/Write,disk,secm-datasource/disk_io.rs,PDH PhysicalDisk(*) Read/Write Bytes/sec per-volume,USER_SAFE,唯一来源,KEEP,=LiteMonitor PerfCounter 同源(per-volume 更细)；LiteMonitor _Total 聚合语义由消费端聚合
+DISK.Activity,disk,无,% Disk Time 未实现,USER_SAFE,缺失,NEW,LiteMonitor: PhysicalDisk\% Disk Time\_Total→Phase4 补齐(PDH)
+DISK.Temp,disk,无,LHM Storage Temperature 未启用(sidecar IsStorageEnabled=false),HARDWARE DEPENDENT,缺失,NEW,=LiteMonitor LHM Storage sensor→Phase4 扩展 sidecar 契约
+DISK.Capacity,disk,secm-core/sensor_service.rs,sysinfo Disks (GetDiskFreeSpaceExW 等价 DriveInfo),USER_SAFE,唯一来源,KEEP,=LiteMonitor DriveInfo 同源
+DISK.Model/Serial,disk,secm-datasource/disk.rs,IOCTL_STORAGE_QUERY_PROPERTY,USER_SAFE,唯一来源(硬件页),KEEP,超出 LiteMonitor 的能力(LiteMonitor 未做盘型号清单)；独立功能页语义保留
+DISK.Smart,disk,secm-datasource/disk.rs,IOCTL NVMe health/ATA PASS_THROUGH + WMI 兜底,NeedsAdmin on ACCESS_DENIED,唯一来源(硬件页),KEEP,超出 LiteMonitor 能力；按需采集(用户点开)；不作为实时指标来源
+NET.Up/Down,network,secm-datasource/net_io.rs,PDH Network Interface(*) Bytes Sent/Received,USER_SAFE,来源之一(侧栏),REPLACE,非 LiteMonitor 来源；LiteMonitor 主路径 LHM Throughput(底层=GetIfTable2 差分)→统一为 GetIfTable2 差分；net_io.rs 按 Phase5 下线
+NET.Up/Down,network,secm-datasource/netif.rs,GetIfTable2 InOctets/OutOctets 差分,USER_SAFE,来源之一(dashboard 趋势卡),KEEP,=LiteMonitor LHM Network Throughput 的等价底层 API(LHM NetworkHardware 内部即 GetIfEntry 差分)→定为 Canonical
+NET.IPv4,network,secm-core/net_info.rs,GetAdaptersAddresses (datasource netif),USER_SAFE,唯一来源,KEEP,=LiteMonitor NetworkInterface.GetAllNetworkInterfaces 等价 API
+NET.LinkSpeed,network,secm-datasource/netif.rs,GetIfTable2 TransmitLinkSpeed,USER_SAFE,唯一来源,KEEP,=LiteMonitor 未消费该指标(LHM Network Speed 传感器未映射)；SECM 保留(等价 API 族)
+NET.TCP Conn,network,secm-datasource/net_io.rs,GetExtendedTcpTable,USER_SAFE,唯一来源,KEEP,非 LiteMonitor 能力(网络页指标)
+BAT.Percent,battery,无,LHM Battery 未启用(sidecar IsBatteryEnabled=false),USER_SAFE,缺失,NEW,=LiteMonitor LHM BAT.Percent→Phase6 扩展 sidecar 契约
+BAT.Power/Current,battery,无,LHM Battery Power/Current 未启用,USER_SAFE,缺失,NEW,=LiteMonitor BAT.Power/Current + AcOnline 符号修正→Phase6
+BAT.Voltage,battery,无,LHM Battery Voltage 未启用,USER_SAFE,缺失,NEW,=LiteMonitor BAT.Voltage→Phase6
+AC.Status,battery,无,未实现,USER_SAFE,缺失,NEW,=LiteMetricUtils GetPowerStatus (SystemInformation.PowerStatus 等价=GetSystemPowerStatus)→Phase6
+Display,display,无,未实现,USER_SAFE,缺失,NEW,LiteMonitor 未实现显示器信息→双方均无→记录为未覆盖
+BIOS/主板型号,motherboard,sidecar-lhm/Program.cs,LHM Motherboard.Name,REQUIRES sidecar admin,唯一来源,KEEP,=LiteMonitor 硬件树名称
+OS 静态信息,os,secm-core/sysinfo.rs,注册表/GetFirmwareType,USER_SAFE,唯一来源,KEEP,非硬件指标(LiteMonitor 无此域)→非硬件功能不动
+OS 电源计划管理,os,secm-datasource/power.rs,powrprof,ADMIN(写入),唯一来源,KEEP,非硬件采集(powercfg 等价功能)→非硬件功能不动；ADR-0001 疑似清单中'power=电池同源'为误判,已修正
+网络诊断,network,secm-core/network.rs,ureq/TCP,USER_SAFE,唯一来源,KEEP,非硬件采集(探测工具)→非硬件功能不动
+FPS,other,无,PresentMon+ETW 未实现,ADMIN_REQUIRED,缺失,SUSPEND,=LiteMonitor FpsCounter 需管理员+sidecar 进程+下载器→普通用户不可用→记录为 REQUIRES ADMIN,暂不迁移
+DATA.DayUp/Down,other,无,TrafficLogger 未实现,USER_SAFE,缺失,SUSPEND,=LiteMonitor 流量统计(会话累积)→与硬件指标无冲突,暂不迁移(记录)
