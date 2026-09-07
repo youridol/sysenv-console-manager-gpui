@@ -1,5 +1,32 @@
 # 更新日志
 
+## [v2.11.0] - 2026-09-08
+### 新增（MINOR：LiteMonitor 硬件采集迁移落地 + 硬件信息页布局/图表重制）
+
+- **硬件采集迁移（ADR-0001~0010 全链路落地，见 audit/ 审计文档）**：
+  - 统一 HardwareSnapshot v2：`Metric<T>`（value/source/updated_at/error）全域
+    不可用语义——真实失败显示"n/a + 诊断"，杜绝 0/默认值冒充（LiteMonitor 历史
+    假值 0f/2500MHz/16GB 未迁移）；
+  - CPU 负载主路径对齐 LiteMonitor：PDH `% Processor Utility` → `% Processor Time`
+    → sysinfo 差分回退；频率链 ntapi→PDH→registry 保留；
+  - 网络速率唯一权威来源 = GetIfTable2 差分（LiteMonitor LHM Throughput 等价底层），
+    FilterInterface/NotHardware 位域 + QoS/Npcap 等关键词双重过滤虚拟接口；下线
+    PDH Network Interface 旧来源（net_io.rs 删除）；
+  - 磁盘活动时间 `% Disk Time`（LiteMonitor DISK.Activity 等价）补齐；
+  - sidecar 契约 v3：+Storage 磁盘温度（30s 慢刷，首拍立即刷新）/ +Battery 电量/
+    功率/电流/电压（AC 符号修正）/ 主板传感器 hw 字段 / CPU 电压排除规则
+    （soc/gt/sa/aux）/ GPU 熔断（>6000MHz、>1200W）/ 核显 Shared 显存优先 /
+    SPD 取真实 DIMM 型号；
+  - 智能匹配等价迁移：MOBO.Temp 智能选择策略（System>Motherboard>Chipset/PCH>
+    合理范围最大 + 硬上限）、FanMapper 风扇/水泵匹配（底噪 200RPM、Cooler 优先、
+    高转速 Pump 猜想）、电池 AC 符号修正（充电正/放电负）；
+  - 双 Token 真机验证：管理员全指标出值；普通用户 USER_SAFE 域全绿；UAC 取消
+    返回 available:false + 明确诊断（零伪造值）；`SECM_DISABLE_LHM` 显式降级开关。
+- **硬件信息页布局重制**：上行 CPU / 内存 / GPU / 网络速率趋势 **一行四列**；
+  下行磁盘存储 · SMART 健康 | 网络流量 **左右两列**。
+- **图表美化**：全部趋势图由"等宽柱状 sparkline"改为**波浪线**（Catmull-Rom 平滑
+  曲线 + 1.8px 描边 + 曲线下方面积渐隐填充，gpui canvas + PathBuilder 矢量渲染）。
+
 ## [v2.10.4] - 2026-09-07
 ### 修复（PATCH：卡片纵向黏连真根因 —— taffy 0.9.0 纵向 gap 不渲染，改逐块 margin）
 - **根因（彩色标记取证法定位）**：给关于页各层临时涂唯一纯色（内容体=绿/页头=蓝/

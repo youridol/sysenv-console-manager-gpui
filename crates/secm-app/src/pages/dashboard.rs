@@ -939,7 +939,9 @@ impl Render for DashboardView {
         let pal = self.pal();
         let s = self.snap.clone();
 
-        // 行装配：等宽两列 flex（禁 grid —— 见文件头布局纪律）
+        // 行装配：等宽 flex（禁 grid —— 见文件头布局纪律）。
+        // v2.11.0：上行 = CPU / 内存 / GPU / 网络速率趋势 一行四列；
+        //          下行 = 磁盘存储 · SMART 健康 | 网络流量 左右两列。
         let cpu = self.cpu_card(&pal, &s).flex_1().min_w(px(0.0));
         let mem = self.mem_card(&pal, &s).flex_1().min_w(px(0.0));
         let gpu = self.gpu_card(&pal, &s).flex_1().min_w(px(0.0));
@@ -947,6 +949,15 @@ impl Render for DashboardView {
         let trend = self.net_trend_card(&pal).flex_1().min_w(px(0.0));
         let traffic = self.net_traffic_card(&pal, cx).flex_1().min_w(px(0.0));
         let row = |a: gpui::Div, b: gpui::Div| div().flex().gap(px(ROW_GAP)).child(a).child(b);
+        let row4 = |a: gpui::Div, b: gpui::Div, c: gpui::Div, d: gpui::Div| {
+            div()
+                .flex()
+                .gap(px(ROW_GAP))
+                .child(a)
+                .child(b)
+                .child(c)
+                .child(d)
+        };
 
         let diag = if s.diag.is_empty() {
             "diag: 采集就绪".to_string()
@@ -966,9 +977,8 @@ impl Render for DashboardView {
                 )
                 .child(status_pill(&pal, "在线", pal.success)),
             )
-            .child(row(cpu, mem))
-            .child(row(gpu, disk))
-            .child(row(trend, traffic))
+            .child(row4(cpu, mem, gpu, trend))
+            .child(row(disk, traffic))
             .child(
                 div()
                     .text_size(px(11.0))

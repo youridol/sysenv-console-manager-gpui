@@ -162,7 +162,7 @@ pub fn if_bytes_map() -> HashMap<String, (u64, u64)> {
         }
         // FilterInterface / NotHardware 位域过滤：剔除 NDIS/WFP 过滤驱动层与
         // 软件伪接口（同一物理卡会重复出现多条同名实例）
-        let flags = unsafe { row.InterfaceAndOperStatusFlags._bitfield };
+        let flags = row.InterfaceAndOperStatusFlags._bitfield;
         if flags & (IF_FLAG_NOT_HARDWARE | IF_FLAG_FILTER_INTERFACE) != 0 {
             continue;
         }

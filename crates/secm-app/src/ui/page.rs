@@ -8,7 +8,10 @@
 // 所有构件返回 gpui::Div，调用方可继续 .id() / .child() / .on_click() 链式装配。
 
 use gpui::prelude::*;
-use gpui::{div, px, Div, ElementId, FontWeight, Rgba, ScrollHandle, SharedString, Stateful};
+use gpui::{
+    canvas, div, point, px, App, Bounds, Div, ElementId, FontWeight, PathBuilder, Pixels, Rgba,
+    ScrollHandle, SharedString, Stateful, Window,
+};
 
 use crate::pi_clone::theme::{Palette, TRANSPARENT};
 
@@ -479,35 +482,117 @@ pub fn metric_value(pal: &Palette, text: impl Into<SharedString>) -> Div {
 /// 趋势图高度
 pub const CHART_HEIGHT: f32 = 56.0;
 
-/// 迷你趋势图（柱状 sparkline）：等宽柱、值越高柱越高、底部语义色基线。
-/// 输入为按时间升序的数值序列（60s 窗口内采样点）；量程 = 序列最大值与 1.0 取大。
+/// 迷你趋势图（波浪线 sparkline，v2.11.0）：Catmull-Rom 平滑曲线 + 曲线下方面积
+/// 渐隐填充 + 底部语义色基线。输入为按时间升序的数值序列（60s 窗口内采样点）；
+/// 量程 = 序列最大值与 1.0 取大。
+///
+/// 渲染走 gpui canvas + PathBuilder（矢量描边/填充），替代旧"等宽柱状"实现 ——
+/// 全部趋势图（CPU/内存/GPU/网络上下行）共用本函数，一处改全线生效。
 pub fn sparkline(values: &[f32], color: Rgba) -> Div {
-    let max = values.iter().cloned().fold(1.0f32, f32::max).max(1.0);
+    let data: Vec<f32> = values.to_vec();
     div()
-        .flex()
         .w_full()
         .h(px(CHART_HEIGHT))
-        .gap(px(1.0))
         .border_b_1()
         .border_color(soft(color, 0.35))
-        .children(values.iter().map(|v| {
-            let frac = (v / max).clamp(0.02, 1.0);
-            div()
-                .flex_1()
-                .min_w(px(0.0))
-                .h_full()
-                .flex_col()
-                .justify_end()
-                .overflow_hidden()
-                .child(
-                    div()
-                        .w_full()
-                        .flex_shrink_0()
-                        .h(px((frac * CHART_HEIGHT).max(2.0)))
-                        .rounded(px(1.0))
-                        .bg(soft(color, 0.80)),
-                )
-        }))
+        .child(
+            canvas(
+                // prepaint：把采样序列带进 paint 阶段（canvas 回调要求 'static）
+                move |_bounds: Bounds<Pixels>, _window: &mut Window, _cx: &mut App| data,
+                move |bounds: Bounds<Pixels>,
+                      data: Vec<f32>,
+                      window: &mut Window,
+                      _cx: &mut App| {
+                    draw_wave_chart(bounds, &data, color, window);
+                },
+            )
+            .w_full()
+            .h_full(),
+        )
+}
+
+/// 波浪线绘制：把序列归一化到画布，Catmull-Rom 样条转三次贝塞尔后
+/// ① 以 `soft(color, 0.14)` 填充曲线下方面积；② 以 1.8px 描边绘制平滑曲线。
+/// 坐标数学统一走 f32 域（Pixels 内部字段 crate 外不可见，px()/除法仅作换算）。
+fn draw_wave_chart(bounds: Bounds<Pixels>, values: &[f32], color: Rgba, window: &mut Window) {
+    let n = values.len();
+    if n == 0 {
+        return;
+    }
+    // Pixels → f32（Div<Pixels> 的 Output = f32）
+    let (ox, oy) = (bounds.origin.x / px(1.0), bounds.origin.y / px(1.0));
+    let (w, h) = (bounds.size.width / px(1.0), bounds.size.height / px(1.0));
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    let pad_top = 4.0;
+    let pad_bottom = 3.0;
+    let usable_h = (h - pad_top - pad_bottom).max(1.0);
+
+    let max = values.iter().cloned().fold(1.0f32, f32::max).max(1.0);
+    let denom = if n > 1 { (n - 1) as f32 } else { 1.0 };
+    let x_at = |i: usize| ox + w * (i as f32 / denom);
+    let y_at = |v: f32| {
+        let frac = (v / max).clamp(0.02, 1.0);
+        oy + pad_top + usable_h * (1.0 - frac)
+    };
+    // 单点：水平拉平为全宽直线
+    let pts: Vec<(f32, f32)> = if n == 1 {
+        let y = y_at(values[0]);
+        vec![(ox, y), (ox + w, y)]
+    } else {
+        (0..n).map(|i| (x_at(i), y_at(values[i]))).collect()
+    };
+    let count = pts.len();
+
+    // Catmull-Rom（uniform）→ 三次贝塞尔控制点：段 i 由 pts[i]→pts[i+1]，
+    // c1 = P1 + (P2-P0)/6，c2 = P2 - (P3-P1)/6（端点做钳制）
+    let seg_controls = |i: usize| -> ((f32, f32), (f32, f32)) {
+        let (p0x, p0y) = pts[i.saturating_sub(1)];
+        let (p1x, p1y) = pts[i];
+        let (p2x, p2y) = pts[(i + 1).min(count - 1)];
+        let (p3x, p3y) = pts[(i + 2).min(count - 1)];
+        let c1 = (p1x + (p2x - p0x) / 6.0, p1y + (p2y - p0y) / 6.0);
+        let c2 = (p2x - (p3x - p1x) / 6.0, p2y - (p3y - p1y) / 6.0);
+        (c1, c2)
+    };
+
+    // ① 曲线下方面积填充（波浪渐隐）
+    let mut fill = PathBuilder::fill();
+    fill.move_to(point(px(pts[0].0), px(pts[0].1)));
+    if count > 1 {
+        for i in 0..count - 1 {
+            let ((c1x, c1y), (c2x, c2y)) = seg_controls(i);
+            fill.cubic_bezier_to(
+                point(px(pts[i + 1].0), px(pts[i + 1].1)),
+                point(px(c1x), px(c1y)),
+                point(px(c2x), px(c2y)),
+            );
+        }
+    }
+    fill.line_to(point(px(ox + w), px(oy + h)));
+    fill.line_to(point(px(ox), px(oy + h)));
+    fill.close();
+    if let Ok(path) = fill.build() {
+        window.paint_path(path, soft(color, 0.14));
+    }
+
+    // ② 波浪描边（平滑曲线主线）
+    let mut stroke = PathBuilder::stroke(px(1.8));
+    stroke.move_to(point(px(pts[0].0), px(pts[0].1)));
+    if count > 1 {
+        for i in 0..count - 1 {
+            let ((c1x, c1y), (c2x, c2y)) = seg_controls(i);
+            stroke.cubic_bezier_to(
+                point(px(pts[i + 1].0), px(pts[i + 1].1)),
+                point(px(c1x), px(c1y)),
+                point(px(c2x), px(c2y)),
+            );
+        }
+    }
+    if let Ok(path) = stroke.build() {
+        window.paint_path(path, soft(color, 0.95));
+    }
 }
 
 /// 空趋势占位（与 sparkline 等高，居中弱化文案）
