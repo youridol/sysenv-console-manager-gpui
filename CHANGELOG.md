@@ -1,5 +1,50 @@
 # 更新日志
 
+## [v3.2.0] - 2026-09-08
+### 新增（MINOR：网络诊断页全量重写 — 纯 Rust + GPUI，对齐原版 /network 全能力面）
+
+- **网络诊断引擎 `secm-core::net_diag`（全新，去 tokio 化）**：
+  - **ICMP 引擎**：改用 iphlpapi 系统态 ICMP（`IcmpSendEcho` / `Icmp6SendEcho2`）——
+    非管理员可用（原版 raw socket 需管理员）；TTL 经 `IP_OPTION_INFORMATION` 真实生效；
+    Time Exceeded 由系统返回路由器地址，无需自解析内嵌 IP 头；
+    - IPv6 回复按实机验证的 packed 布局手工解析（地址@6..22 / Status@26 / RTT@30，
+      回环 ::1 实测确认）；IPv4 IPAddr 采用内存序（`from_ne_bytes`，修正字节序陷阱）；
+  - **Ping**：ICMP/TCP/UDP 三协议真实现（原版 UI 有 proto 开关但后端静默忽略）；
+    次数/间隔/包大小/TTL/截止时间/连续模式全参数 + 流式事件 + 取消 + 汇总；
+    单包超时 2000ms（对齐原版 surge-ping 默认值）；
+  - **Traceroute**：最多 64 跳 × 每跳 3 并发探针（1200ms/跳，命中目标即止），
+    支持指定 DNS 服务器（预设 6 + 自定义）；
+  - **Nslookup**：自研 RFC 1035 UDP DNS 客户端（A/AAAA 全量记录 + CNAME 跟随防环 +
+    压缩指针解析 + TC 显式报错），系统 DNS 经 GetAdaptersAddresses 同源获取；
+  - **NAT 检测**：RFC 3489 经典三阶段（Binding / 二次绑定 / Change-Request），
+    NAT0–NAT4 分类逐行对齐原版，15 台预设 STUN + 自定义，取消 300ms 切片唤醒；
+  - **DHCP**：DHCPDISCOVER 主动探测（SO_REUSEADDR 绑 68 与系统 Dhcp 服务共存，
+    失败降级随机高端口）+ 注册表基线合并（Tcpip\Parameters\Interfaces）+
+    多服务器冲突判定（healthy = count ≤ 1）+ 深度检查（逐台并发 ping +
+    同网段/网关拓扑八案严重度矩阵 + 综合结论），全部移植原版并补取消；
+  - **iperf3**：外部进程 CREATE_NO_WINDOW + stdout 逐行流式 + 取消即 kill +
+    stderr 收集（未安装明确中文反馈）；
+  - **网站测试**：HEAD 探测（任意 HTTP 响应即可达，对齐原版 no-cors fetch 语义）+
+    TCP 端口探测 + 4 默认站点 + 自定义站点 CRUD + JSON 持久化
+    （%LOCALAPPDATA%\SECM\config\network_sites.json，原子写）；
+  - **取消注册表**：HashMap<cmdId, Arc<AtomicBool>>，每任务独立生命周期，完成即清理。
+- **网络诊断页 `pages/network.rs` 全量重写（GPUI）**：
+  - DHCP 卡（检测/深度检查双态 + 健康横幅 + 服务器徽标 + 建议清单 + 逐台诊断）；
+  - 网站测试卡（站点网格 + 增删改表单 + 手动/自动检测 3~60s 六档 + 状态徽标）；
+  - 网络工具卡（6 工具页签 + 共享参数 目标/端口/网络栈/协议 + 每工具参数区 +
+    流式输出区 220px 自动滚底 + 清除）；
+  - 执行模型：每任务后台线程 → mpsc 无界通道 → UI 30ms 合并刷新；
+    停止 = cancel 置位 → 任务退出 → DONE 哨兵冲刷（无孤儿任务，取消可观察可记录）；
+- **日志零丢失**：LogBuffer 环形 200→2000（500ms 轮询下需 >4000 条/秒才溢出，
+  实际最高频 ≈100 条/秒）；右栏 KEEP_LINES 500→1000；网络诊断每个用户操作、
+  状态变化、逐条事件结果、取消、异常全部 `log::` 打点进右侧日志流并按天落盘。
+- **测试**：新增 33 个单测（报文构造/解析/去重/合并/八案矩阵/持久化 round-trip/
+  cancel 生命周期/取消提前返回）+ 17 个实机用例（ICMP v4/v6 回环与外网与超时路径、
+  DNS A/AAAA、NAT 三阶段、Traceroute 网关/公网/指定 DNS、DHCP 探测与深度检查、
+  站点/端口探测）全部通过；全仓 130 测试 0 失败，`cargo check` 零警告。
+- **文档**：`docs/secm-network-adr/` ADR-0001（全链路审计与功能矩阵）、
+  ADR-0002（架构设计）、ADR-0003（测试结果与验收报告）。
+
 ## [v3.1.0] - 2026-09-08
 ### 修复 + 新增（MINOR：CPU 温度 ring0 通道恢复 + 硬件信息页布局/网络卡整理）
 

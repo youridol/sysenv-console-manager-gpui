@@ -5214,7 +5214,7 @@ checksum = "1c107b6f4780854c8b126e228ea8869f4d7b71260f962fefb57b996b8959ba6b"
 
 [[package]]
 name = "secm-app"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "gpui",
@@ -5231,15 +5231,17 @@ dependencies = [
 
 [[package]]
 name = "secm-core"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "chrono",
  "encoding_rs",
  "log",
  "parking_lot",
+ "rand 0.8.8",
  "secm-datasource",
  "serde",
  "serde_json",
+ "socket2",
  "sysinfo 0.30.13",
  "thiserror 2.0.20",
  "ureq",
@@ -5249,7 +5251,7 @@ dependencies = [
 
 [[package]]
 name = "secm-datasource"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "log",
  "nvml-wrapper",

@@ -24,8 +24,9 @@ use super::layout;
 use super::theme::Palette;
 use super::PiShell;
 
-/// 自上次推送后保留的行数（超出丢弃最旧，防内存/渲染膨胀）
-pub const KEEP_LINES: usize = 500;
+/// 自上次推送后保留的行数（超出丢弃最旧，防内存/渲染膨胀；
+/// 全量历史仍在 LogBuffer（2000 条环形）与按天落盘文件中，面板为流式视图）
+pub const KEEP_LINES: usize = 1000;
 
 impl PiShell {
     /// Right panel（桌面/覆盖/移动统一进入；宽度与模式已由 AppShell 决策）

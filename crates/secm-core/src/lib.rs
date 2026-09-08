@@ -9,6 +9,7 @@ pub mod game_env;
 pub mod hardware;
 pub mod logger;
 pub mod net_config;
+pub mod net_diag;
 pub mod net_info;
 pub mod netif;
 pub mod network;

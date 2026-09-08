@@ -19,7 +19,8 @@ pub struct LogEntry {
     pub timestamp: String,
 }
 
-/// 环形日志缓冲（容量 200，对齐源 log.rs）
+/// 环形日志缓冲（容量 2000：网络诊断流式输出下 500ms 轮询零丢失，
+/// 需 >4000 条/秒才会溢出，实际最高频 ≈100 条/秒（10ms 连续 Ping），余量 40 倍）
 pub struct LogBuffer {
     inner: Mutex<LogInner>,
 }
@@ -35,8 +36,8 @@ impl LogBuffer {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             inner: Mutex::new(LogInner {
-                entries: Vec::with_capacity(200),
-                capacity: 200,
+                entries: Vec::with_capacity(2000),
+                capacity: 2000,
                 listeners: Vec::new(),
             }),
         })
