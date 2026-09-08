@@ -58,8 +58,11 @@ impl PiShell {
                 .h(px(34.0))
                 .px(px(4.0))
                 .gap(px(4.0))
-                // 可拖动标题区（logo + 全称 + 弹性空白），占满到按钮前
+                // 可拖动标题区（品牌图标 + 弹性空白），占满到按钮前
                 // 无标题栏：按下时发起系统窗口拖动
+                // 修复：logo 原为 accent 空色块（无内容，部分主题下视觉近白），
+                // 改为品牌 Terminal 图标（accent 色）；标题文本已按用户指令移除
+                // （窗口名仍保留于任务栏/Alt-Tab，见 main.rs TitlebarOptions）
                 .child(
                     div()
                         .id("pi-sidebar-drag")
@@ -72,22 +75,13 @@ impl PiShell {
                         .window_control_area(gpui::WindowControlArea::Drag)
                         .child(
                             div()
-                                .size(px(14.0))
-                                .rounded(px(4.0))
-                                .bg(pal.accent)
+                                .size(px(18.0))
+                                .rounded(px(5.0))
+                                .bg(pal.bg_selected)
                                 .flex()
                                 .items_center()
-                                .justify_center(),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .truncate()
-                                .text_size(px(11.5))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(pal.text)
-                                .child(SharedString::from("SysEnv Console Manager")),
+                                .justify_center()
+                                .child(icons::icon(Icon::Terminal, 12.0).text_color(pal.accent)),
                         ),
                 )
                 .child(self.chrome_theme_button(pal, cx))

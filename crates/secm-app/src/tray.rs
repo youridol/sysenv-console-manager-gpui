@@ -71,17 +71,26 @@ pub fn spawn_tray() -> mpsc::Receiver<TrayAction> {
                     let _ = quit_tx.send(TrayAction::Quit);
                 }
             }));
-            if tray_icon::TrayIconBuilder::new()
+            // [问题定位/修复] build() 返回的 TrayIcon 必须持有：tray-icon 0.24 Windows 平台
+            // Drop 即执行 remove_tray_icon → Shell_NotifyIconW(NIM_DELETE)
+            // （platform_impl/windows/mod.rs:297 实证）。历史实现 `.build().is_err()`
+            // 使返回值为临时值被立即 Drop → 托盘图标创建后即刻消失（失效根因）。
+            let built = tray_icon::TrayIconBuilder::new()
                 .with_icon(icon)
                 .with_tooltip("SysEnv Console Manager")
                 .with_menu(Box::new(menu))
-                .build()
-                .is_err()
-            {
-                tray_fail("托盘创建失败（系统托盘不可用？），托盘不可用；请从主窗口操作");
+                .build();
+            if let Err(e) = built {
+                tray_fail(&format!(
+                    "托盘创建失败（系统托盘不可用？{e}），托盘不可用；请从主窗口操作"
+                ));
                 return;
             }
+            let tray_icon = built.expect("Err 分支已 return");
+            secm_core::logger::LogBuffer::global().append("Info", "tray", "托盘图标已创建");
+            // 图标对象存活至消息循环结束（线程退出时 Drop → 移除托盘图标，应用退出路径）
             unsafe { run_win32_message_loop() };
+            drop(tray_icon);
         });
     if let Err(e) = spawned {
         // 线程启动失败不再 panic（P1-13）：托盘缺失但应用可用

@@ -1,27 +1,25 @@
 // secm-app::pages::cleanup — 清理优化页（对齐上游 /cleanup Cleanup.tsx 全能力面）
 // 缓存清理（临时/着色器 4 厂商/一键全清）+ 进程管理（Top 200 uniform_list 增量渲染
-// + 名称/PID 搜索 + 6 档优先级）+ DNS 刷新 + 工作集修剪 + 执行结果追溯
-// （页内历史回看 + 结果明细逐行进右侧日志流面板）。
+// + 名称/PID 搜索 + 6 档优先级）+ DNS 刷新。
+// 执行结果追溯（用户指令 v3.2.1）：页内追溯卡已拆除——全部清理/快捷操作的执行与
+// 结果逐行流式记录到右侧日志流面板（record_result → log::），右侧栏为唯一追溯出口。
 // 清理为文件 IO，放后台线程执行避免卡 UI。
 // 呈现层统一由 crate::ui::page 装配，色板取自 Palette（明暗随壳主题联动）。
 
 use gpui::prelude::*;
 use gpui::{
-    div, px, uniform_list, Context, Entity, FontWeight, Render, ScrollHandle, SharedString,
+    div, px, uniform_list, Context, Entity, Render, ScrollHandle, SharedString,
     UniformListScrollHandle, WeakEntity, Window,
 };
 use secm_core::cleanup::{self, CleanupResult, ProcessInfo};
 
 use crate::pi_clone::theme::{Appearance, Palette};
 use crate::ui::page::{
-    badge, banner, button, button_sm, card, card_body, card_divider, card_header_accent,
-    page_header, page_root, section_title, table_empty, table_head, table_row, BannerKind,
-    ButtonKind, ColWidth, CARD_PADDING,
+    badge, banner, button, button_sm, card, card_divider, card_header_accent, page_header,
+    page_root, section_title, table_empty, table_head, table_row, BannerKind, ButtonKind, ColWidth,
+    CARD_PADDING,
 };
 use crate::ui::text_input::{ChangeText, TextField};
-
-/// 执行历史容量（最新在前；超出丢弃最旧，防内存/渲染膨胀）
-const HISTORY_CAP: usize = 50;
 
 /// 清理操作类型（按钮 → 后台执行函数映射）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,20 +59,8 @@ impl CleanOp {
     }
 }
 
-/// 执行结果追溯条目（操作完成时刻 + 结构化结果）
-#[derive(Debug, Clone)]
-struct ExecEntry {
-    /// 完成时刻（HH:MM:SS 本地时区）
-    time: SharedString,
-    result: CleanupResult,
-}
-
 pub struct CleanupView {
     procs: Vec<ProcessInfo>,
-    /// 当前明细展示的执行结果（默认最近一次；点击历史行可回看任意一次）
-    detail: Option<ExecEntry>,
-    /// 执行结果历史（最新在前，容量 HISTORY_CAP）
-    history: Vec<ExecEntry>,
     /// DNS 刷新等操作结果反馈
     status: SharedString,
     /// 清理是否执行中（防并发点击）
@@ -87,15 +73,13 @@ pub struct CleanupView {
     search_input: Entity<TextField>,
     /// 进程列表虚拟滚动句柄（uniform_list 仅渲染可见行，Top 200 无全量布局开销）
     proc_list_scroll: UniformListScrollHandle,
-    /// 执行历史列表滚动句柄
-    hist_scroll: ScrollHandle,
     /// 页面外观，随壳主题联动
     appearance: Appearance,
     /// 页面滚动状态（GPUI 0.2 滚轮需 track_scroll 手动驱动，见 ui::page::page_root）
     page_scroll: gpui::ScrollHandle,
 }
 
-/// 快捷操作语义（历史 op_button 靠 label.contains("DNS") 字符串嗅探分发，已弃用）
+/// 快捷操作语义（按钮 → 后台执行函数映射；按钮分置缓存清理卡/进程管理卡）
 #[derive(Clone, Copy)]
 enum QuickOp {
     FlushDns,
@@ -114,17 +98,14 @@ impl CleanupView {
         .detach();
         let mut v = Self {
             procs: Vec::new(),
-            detail: None,
-            history: Vec::new(),
             status: SharedString::from("正在加载进程列表…"),
             cleaning: false,
             loading_procs: false,
             keyword: SharedString::from(""),
             search_input,
             proc_list_scroll: UniformListScrollHandle::default(),
-            hist_scroll: gpui::ScrollHandle::new(),
             appearance,
-            page_scroll: gpui::ScrollHandle::new(),
+            page_scroll: ScrollHandle::new(),
         };
         log::info!("清理优化 · 页面已打开");
         v.refresh_procs(cx);
@@ -175,11 +156,10 @@ impl CleanupView {
         .detach();
     }
 
-    /// 记录执行结果（追溯双通道）：
-    /// ① 页内历史（最新在前 + 明细面板切换为该次结果）；
-    /// ② 结果明细逐行写入 log → 右侧日志流面板（失败行/重启删除行以 Warn 呈现）。
-    fn record_result(&mut self, result: CleanupResult, cx: &mut Context<Self>) {
-        let time = SharedString::from(secm_core::logger::now_hms());
+    /// 记录执行结果（追溯唯一出口：全部逐行流式写入右侧日志流面板；
+    /// 摘要行含操作/结论/释放量，明细行失败/重启删除以 Warn 呈现）
+    fn record_result(&mut self, result: CleanupResult, _cx: &mut Context<Self>) {
+        let time = secm_core::logger::now_hms();
         let verdict = if result.success {
             "成功"
         } else {
@@ -192,7 +172,7 @@ impl CleanupView {
             verdict,
             Self::fmt_bytes(result.bytes_freed)
         );
-        // 明细逐行（一行一条日志，与页内明细逐行渲染一一对应）
+        // 明细逐行（一行一条日志）
         for line in result.message.lines() {
             let line = line.trim();
             if line.is_empty() {
@@ -207,20 +187,6 @@ impl CleanupView {
             } else {
                 log::info!("清理优化 · [{}] {} · {}", time, result.operation, line);
             }
-        }
-        self.history.insert(0, ExecEntry { time, result });
-        if self.history.len() > HISTORY_CAP {
-            self.history.truncate(HISTORY_CAP);
-        }
-        self.detail = Some(self.history[0].clone());
-        cx.notify();
-    }
-
-    /// 回看某条历史明细（点击历史行 → 明细区切换到该次结果）
-    fn show_entry(&mut self, index: usize, cx: &mut Context<Self>) {
-        if let Some(e) = self.history.get(index) {
-            self.detail = Some(e.clone());
-            cx.notify();
         }
     }
 
@@ -332,14 +298,14 @@ impl Render for CleanupView {
             .child(page_header(
                 &pal,
                 "清理优化",
-                "缓存清理 · 进程管理 · DNS 刷新 · 结果追溯",
+                "缓存清理 · 进程管理 · DNS 刷新 · 执行结果全量记录于右侧日志流",
             ))
             // 状态消息
             .when(!status.is_empty(), |s| {
                 let msg = status.clone();
                 s.child(banner(&pal, BannerKind::Info, msg))
             })
-            // 主体第一行：窗口宽时左右两栏（左=缓存清理；右=快捷+进程管理）；
+            // 主体行：窗口宽时左右两栏（左=缓存清理；右=进程管理）；
             // 窄窗（<900）时上下堆叠（响应式自适应）
             .child(
                 div()
@@ -347,7 +313,7 @@ impl Render for CleanupView {
                     .when(!side_by_side, |s| s.flex_col())
                     .items_start()
                     .gap_4()
-                    // 左列（缓存清理）
+                    // 左列（缓存清理，含 DNS 刷新）
                     .child(
                         div()
                             .flex_col()
@@ -355,18 +321,15 @@ impl Render for CleanupView {
                             .gap_4()
                             .child(self.clean_card(&pal, cleaning, cx)),
                     )
-                    // 右列（快捷操作 + 进程管理）
+                    // 右列（进程管理：刷新 + 搜索并入卡容器）
                     .child(
                         div()
                             .flex_col()
                             .when(side_by_side, |s| s.flex_1().min_w(px(0.0)))
                             .gap_4()
-                            .child(self.quick_card(&pal, cx))
                             .child(self.proc_card(&pal, &filtered, cx)),
                     ),
             )
-            // 主体第二行：执行结果追溯（全宽，对齐上游独立结果区）
-            .child(self.history_card(&pal, cx))
     }
 }
 
@@ -395,7 +358,7 @@ impl CleanupView {
                     .text_color(pal.text_muted)
                     .child("清理系统临时文件与显卡厂商着色器缓存，释放磁盘空间。"),
             )
-            // 分组：系统临时
+            // 分组：系统临时（清理临时文件 + DNS 缓存刷新，用户指令：快捷操作按钮并入此行）
             .child(
                 div()
                     .px(px(CARD_PADDING))
@@ -409,7 +372,8 @@ impl CleanupView {
                     .flex()
                     .flex_wrap()
                     .gap_2()
-                    .child(self.clean_button(pal, CleanOp::Temp, cleaning, cx)),
+                    .child(self.clean_button(pal, CleanOp::Temp, cleaning, cx))
+                    .child(self.op_button(pal, "刷新 DNS 缓存", QuickOp::FlushDns, cx)),
             )
             // 分组：显卡着色器缓存
             .child(
@@ -476,27 +440,7 @@ impl CleanupView {
             .child(label)
     }
 
-    /// 快捷操作卡（DNS 刷新 / 进程列表刷新 / 进程搜索输入）
-    fn quick_card(&self, pal: &Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        card(pal)
-            .child(card_header_accent(pal, "快捷操作", pal.success))
-            .child(card_divider(pal))
-            .child(
-                card_body(pal).child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .items_center()
-                        .gap_2()
-                        .child(self.op_button(pal, "刷新 DNS 缓存", QuickOp::FlushDns, cx))
-                        .child(self.op_button(pal, "刷新进程列表", QuickOp::RefreshProcs, cx))
-                        // 搜索输入容器（宽度固定，实体与订阅不变）
-                        .child(div().w(px(220.0)).child(self.search_input.clone())),
-                ),
-            )
-    }
-
-    /// 快捷操作按钮（统一 Primary；id 沿用操作文案）
+    /// 快捷操作按钮（统一 Primary；id 沿用操作文案；现分置于缓存清理卡/进程管理卡）
     fn op_button(
         &self,
         pal: &Palette,
@@ -514,7 +458,8 @@ impl CleanupView {
             .child(label_owned)
     }
 
-    /// 进程管理卡（uniform_list 增量渲染 Top 200 + 名称/PID 搜索 + 6 档优先级行内设置）
+    /// 进程管理卡（uniform_list 增量渲染 Top 200 + 名称/PID 搜索 + 6 档优先级行内设置；
+    /// 刷新按钮与搜索输入并入卡容器，标题右侧小字描述：进程的 CPU 优先级）
     fn proc_card(
         &self,
         pal: &Palette,
@@ -523,20 +468,36 @@ impl CleanupView {
     ) -> impl IntoElement {
         let loading = self.procs.is_empty();
         card(pal)
-            // 卡片头：accent 圆点 + 标题 + 右侧进程计数
+            // 卡片头：accent 圆点 + 标题 + 右侧小字描述（进程的CPU优先级）与计数
             .child(
                 card_header_accent(pal, "进程管理", pal.accent).child(
                     div()
                         .text_size(px(11.5))
                         .text_color(pal.text_muted)
                         .child(SharedString::from(format!(
-                            "共 {} 个 · 显示 {} 个",
+                            "进程的CPU优先级 · 共 {} 个 · 显示 {} 个",
                             self.procs.len(),
                             filtered.len()
                         ))),
                 ),
             )
             .child(card_divider(pal))
+            // 工具栏（并入卡容器）：刷新进程列表 + 搜索输入（弹性占满）
+            .child(
+                div()
+                    .px(px(CARD_PADDING))
+                    .py(px(8.0))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(self.op_button(pal, "刷新进程列表", QuickOp::RefreshProcs, cx))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .child(self.search_input.clone()),
+                    ),
+            )
             // 表头固定于滚动区外（Top 200 滚动时表头不随行滚走）
             .child(table_head(
                 pal,
@@ -658,197 +619,5 @@ impl CleanupView {
                     .gap_1()
                     .children(prio_cells),
             )
-    }
-
-    /// 执行结果追溯卡（统计徽标 + 明细区逐行渲染 + 历史列表点击回看）
-    fn history_card(&self, pal: &Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let ok_cnt = self.history.iter().filter(|e| e.result.success).count();
-        let fail_cnt = self.history.len() - ok_cnt;
-        card(pal)
-            .child(
-                card_header_accent(pal, "执行结果追溯", pal.success).child(badge(
-                    pal,
-                    SharedString::from(format!("{} 成功 · {} 失败", ok_cnt, fail_cnt)),
-                    if fail_cnt == 0 {
-                        pal.success
-                    } else {
-                        pal.warning
-                    },
-                )),
-            )
-            .child(card_divider(pal))
-            .when(self.history.is_empty(), |s| {
-                s.child(table_empty(
-                    pal,
-                    "使用上方操作按钮，执行结果将追溯显示在此处（并同步至右侧日志流）",
-                ))
-            })
-            .when(!self.history.is_empty(), |s| {
-                // 明细区：当前展示的那次结果（默认最近一次；点击历史行回看）
-                s.when_some(self.detail.clone(), |s, e| {
-                    let state_color = if e.result.success {
-                        pal.success
-                    } else {
-                        pal.warning
-                    };
-                    let verdict = if e.result.success {
-                        "成功"
-                    } else {
-                        "部分完成"
-                    };
-                    let lines: Vec<SharedString> = e
-                        .result
-                        .message
-                        .lines()
-                        .filter(|l| !l.trim().is_empty())
-                        .map(|l| SharedString::from(l.trim().to_string()))
-                        .collect();
-                    s.child(
-                        div()
-                            .px(px(CARD_PADDING))
-                            .pt_3()
-                            // 摘要行：状态点 + 操作名 + 完成时刻 + 结果/释放量
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(div().size(px(6.0)).rounded_full().bg(state_color))
-                                    .child(
-                                        div()
-                                            .text_size(px(12.5))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(pal.text)
-                                            .child(e.result.operation.clone()),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(11.0))
-                                            .text_color(pal.text_dim)
-                                            .child(e.time.clone()),
-                                    )
-                                    .child(div().flex_1())
-                                    .child(
-                                        div().text_size(px(11.0)).text_color(state_color).child(
-                                            SharedString::from(format!(
-                                                "{} · 释放 {}",
-                                                verdict,
-                                                Self::fmt_bytes(e.result.bytes_freed)
-                                            )),
-                                        ),
-                                    ),
-                            )
-                            // 明细逐行（[完成时刻] 前缀 + 行文本，与右侧日志流一一对应）
-                            .when(!lines.is_empty(), |s| {
-                                s.child(div().mt_2().flex().flex_col().gap(px(2.0)).children(
-                                    lines.into_iter().map(|line| {
-                                        div()
-                                            .flex()
-                                            .items_start()
-                                            .gap(px(6.0))
-                                            .child(
-                                                div()
-                                                    .flex_none()
-                                                    .w(px(56.0))
-                                                    .text_size(px(10.0))
-                                                    .text_color(pal.text_dim)
-                                                    .child(e.time.clone()),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .min_w(px(0.0))
-                                                    .text_size(px(11.0))
-                                                    .text_color(pal.text_muted)
-                                                    .child(line),
-                                            )
-                                    }),
-                                ))
-                            }),
-                    )
-                    .child(card_divider(pal))
-                })
-                // 历史列表（固定高度滚动；点击行 → 明细区切换到该次结果）
-                .child(
-                    div()
-                        .id("exec-history-scroll")
-                        .flex_col()
-                        .h(px(220.0))
-                        .overflow_y_scroll()
-                        .track_scroll(&self.hist_scroll)
-                        .on_scroll_wheel({
-                            let this = cx.entity();
-                            move |_ev: &gpui::ScrollWheelEvent, _w, cx| {
-                                let _ = this.update(cx, |_, cx| cx.notify());
-                            }
-                        })
-                        .children(self.history.iter().enumerate().map(|(ix, e)| {
-                            let state_color = if e.result.success {
-                                pal.success
-                            } else {
-                                pal.danger
-                            };
-                            div()
-                                .id(SharedString::from(format!("exec-hist-{}", ix)))
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .px(px(CARD_PADDING))
-                                .py(px(6.0))
-                                .border_b_1()
-                                .border_color(pal.border)
-                                .cursor_pointer()
-                                .hover(|s| s.bg(pal.bg_hover))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.show_entry(ix, cx);
-                                }))
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .w(px(60.0))
-                                        .text_size(px(11.0))
-                                        .text_color(pal.text_dim)
-                                        .child(e.time.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .size(px(6.0))
-                                        .flex_none()
-                                        .rounded_full()
-                                        .bg(state_color),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w(px(0.0))
-                                        .overflow_hidden()
-                                        .text_size(px(12.0))
-                                        .text_color(pal.text)
-                                        .child(e.result.operation.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .text_size(px(11.0))
-                                        .text_color(pal.text_muted)
-                                        .child(SharedString::from(Self::fmt_bytes(
-                                            e.result.bytes_freed,
-                                        ))),
-                                )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .w(px(44.0))
-                                        .text_size(px(11.0))
-                                        .text_color(state_color)
-                                        .child(if e.result.success {
-                                            "成功"
-                                        } else {
-                                            "未完全"
-                                        }),
-                                )
-                        })),
-                )
-            })
     }
 }
