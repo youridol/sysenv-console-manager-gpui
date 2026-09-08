@@ -375,6 +375,84 @@ pub fn get_power_status() -> Option<PowerStatus> {
     })
 }
 
+// ============================================================================
+// 原生电池状态采集（v3.0.0：替代 LHM sidecar Battery 域；全用户态零提权）
+// ============================================================================
+
+/// 原生电池状态快照（CallNtPowerInformation(SystemBatteryState)）
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BatteryState {
+    /// 存在电池（台式机无电池 → 调用方按"无电池域"处理）
+    pub battery_present: bool,
+    /// 是否接通外接电源
+    pub ac_online: bool,
+    /// 是否正在充电
+    pub charging: bool,
+    /// 是否正在放电
+    pub discharging: bool,
+    /// 电量 %（RemainingCapacity/MaxCapacity 推算；容量无效 → None）
+    pub percent: Option<f32>,
+    /// 充放电功率 W（Rate mW；符号约定：充电=+输入 / 放电=−输出；
+    /// Rate=0（满电静置/无充放电）或 0x7FFFFFFF（未知速率）→ None）
+    pub power_w: Option<f32>,
+}
+
+/// 读取原生电池状态（ntdll.CallNtPowerInformation(SystemBatteryState)，普通用户可读）
+///
+/// 返回 None：API 失败（NTSTATUS != 0）或系统无电池。无缓存策略由调用方决定。
+pub fn get_battery_state() -> Option<BatteryState> {
+    // SAFETY: SYSTEM_BATTERY_STATE 为数值 POD，零值合法；输出缓冲大小 = 结构大小
+    let mut st: SYSTEM_BATTERY_STATE = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        CallNtPowerInformation(
+            SystemBatteryState,
+            std::ptr::null(),
+            0,
+            &mut st as *mut _ as *mut core::ffi::c_void,
+            std::mem::size_of::<SYSTEM_BATTERY_STATE>() as u32,
+        )
+    };
+    if rc != 0 {
+        // 台式机/精简系统可能返回错误；debug 级即可（电池域缺失不算故障）
+        log::debug!(
+            "[power] CallNtPowerInformation(SystemBatteryState) failed: ntstatus=0x{rc:08X}"
+        );
+        return None;
+    }
+    if !st.BatteryPresent {
+        return None;
+    }
+
+    // 电量 %（容量字段有效才推算，不伪造）
+    let percent = if st.MaxCapacity > 0 {
+        Some((st.RemainingCapacity as f32 / st.MaxCapacity as f32 * 100.0).clamp(0.0, 100.0))
+    } else {
+        None
+    };
+
+    // 充放电功率：Rate 为 mW；0x7FFFFFFF 是"速率未知"哨兵值（Windows SDK 语义）
+    const RATE_UNKNOWN: u32 = 0x7FFF_FFFF;
+    let power_w = if st.Rate == 0 || st.Rate == RATE_UNKNOWN {
+        None
+    } else if st.Charging {
+        Some(st.Rate as f32 / 1000.0)
+    } else if st.Discharging {
+        Some(-(st.Rate as f32) / 1000.0)
+    } else {
+        // 既不充电也不放电（满电静置挂 AC）：Rate 残留值不代表实时功率 → 不产出
+        None
+    };
+
+    Some(BatteryState {
+        battery_present: true,
+        ac_online: st.AcOnLine,
+        charging: st.Charging,
+        discharging: st.Discharging,
+        percent,
+        power_w,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

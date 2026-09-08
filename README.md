@@ -3,11 +3,14 @@
 > Windows 10/11 系统环境管理桌面工具 — **纯 Rust + GPUI**（Zed UI 框架）
 > 硬件监控 / 清理优化 / 网络诊断 / 系统设置 / 环境检测 一站式平台
 
-[![Version](https://img.shields.io/badge/version-v2.0.0-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v3.0.0-blue)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 > ⚠️ **v2.0.0 为纯 Rust + GPUI 完整重构**。历史 Tauri 2 + React 版本（v1.x）见
 > 原仓库：https://github.com/youridol/sysenv-console-manager
+>
+> ⚠️ **v3.0.0 硬件采集去 HTTP 化**：Rust 原生采集 + GPUI 直接消费，删除
+> LHM .NET sidecar 与全部本地 HTTP 链路（原 45980 端口），进程内 Rust 类型直传。
 
 ## 技术栈
 
@@ -15,8 +18,9 @@
 |----|------|
 | UI | GPUI 0.2（Zed，Apache-2.0，Windows DirectX/blade 渲染） |
 | 语言 | Rust（edition 2021，workspace） |
-| 采集 | secm-datasource（Win32/注册表/HTTP 纯 Rust 采集） |
-| 温度/功耗 | LHM .NET sidecar（MPL-2.0 进程隔离，45980 端口）；WinRing0/ACPI 降级链为后续版本计划 |
+| 采集 | secm-datasource（Win32/PDH/IOCTL/WMI/NVML/DXGI 纯 Rust 原生采集，零 HTTP 零提权） |
+| GPU | NVML（NVIDIA 用户态实时指标）+ DXGI（全厂商枚举） |
+| 温度 | NVMe 健康日志（IOCTL，用户态）；CPU/SATA 温度需管理员 ring0 → 如实 unavailable |
 | 系统托盘 | tray-icon（后台线程 + win32 消息泵） |
 
 ## 项目结构
@@ -24,20 +28,18 @@
 ```
 sysenv-console-manager-gpui/
 ├── crates/
-│   ├── secm-datasource/   # 纯 Rust 采集层（注册表/服务/电源/网络/DNS/磁盘…）
-│   ├── secm-core/         # 业务逻辑（采集编排/系统操作，无 UI 依赖）
+│   ├── secm-datasource/   # 纯 Rust 原生采集层（注册表/服务/电源/网络/DNS/磁盘/GPU/内存…）
+│   ├── secm-core/         # 业务逻辑（采集编排/系统操作，无 UI 依赖；统一 SensorSnapshot）
 │   └── secm-app/          # GPUI 桌面应用（UI + 装配 + main）
-├── sidecar-lhm/           # LHM 温度 sidecar（.NET 8 源码 + MPL-2.0 许可，GPL-2.0 PawnIO 隔离边界）
-├── third_party/           # 第三方驱动（WinRing0/PawnIO）源码与许可
-├── scripts/publish.ps1    # 一键发布（Rust + sidecar + 许可 → dist/）
+├── third_party/           # 第三方驱动（WinRing0/PawnIO）源码与许可（v3 起无消费者，预留）
+├── scripts/               # 构建/发布脚本
 ├── docs/adr/              # 架构决策记录（重构全案）
-├── docs/spec/             # 功能基准（验收依据）
 └── LICENSE                # MIT
 ```
 
-> LHM 温度 sidecar 以进程隔离方式运行（MPL-2.0 边界）；发布时由 scripts/publish.ps1
-> dotnet publish 出 `lhm/publish/LhmSidecar.exe`，主程序自动从 exe 同目录定位
-> （也可用环境变量 `SECM_LHM_SIDECAR` 指定目录）。第三方驱动见 third_party/ 内 README。
+> v3.0.0 硬件数据全部进程内 Rust 直调（Sensor Manager → Native Backend），
+> 无 HTTP/localhost/JSON 反序列化链路，无 sidecar 子进程，普通用户可运行；
+> ring0 专属指标（CPU 温度/功耗/电压、主板 SuperIO）如实 unavailable。
 
 ## 页面
 

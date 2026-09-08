@@ -4,7 +4,9 @@
 // 启动时系统不再为其分配控制台；debug 构建（cargo run）保留控制台以便查看
 // eprintln 开发日志。
 // 子进程侧黑框防护已全量覆盖：全部 Command::new 均带 CREATE_NO_WINDOW
-// （proc_util::run_command_with_timeout / lhm spawn+taskkill）。
+// （proc_util::run_command_with_timeout）。
+// v3.0.0：硬件采集纯原生（Rust Sensor Core 直调），无 sidecar/HTTP 链路，
+// 退出时仅需趋势历史落盘兜底。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod icons;
@@ -63,12 +65,12 @@ fn main() {
             // 若阻塞 recv() 会 park 主线程导致窗口无响应（空白窗体 BUG 根因）。
             let tray_rx = tray::spawn_tray();
 
-            // 应用退出前清理 LHM sidecar（受控 HTTP 退出 + PID/映像名 taskkill 兜底，P1-3）。
+            // 应用退出前趋势历史落盘兜底（脏时立即写，保证趋势图跨重启恢复完整）。
+            // v3.0.0：硬件采集纯原生（进程内直调），无 sidecar/HTTP 链路需要清理。
             // on_app_quit 覆盖所有退出路径（托盘退出/系统关机）；detach 使订阅常驻不被注销。
             cx.on_app_quit(|_| async {
                 // 趋势历史落盘兜底（脏时立即写，保证趋势图跨重启恢复完整）
                 secm_core::sensor_history::flush();
-                secm_core::lhm::shutdown();
             })
             .detach();
 

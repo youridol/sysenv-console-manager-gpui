@@ -36,10 +36,10 @@ use windows_sys::Win32::{
             NVMeDataTypeLogPage, PropertyStandardQuery, ProtocolTypeNvme,
             StorageAdapterProtocolSpecificProperty, StorageDeviceProperty,
             StorageDeviceSeekPenaltyProperty, DEVICE_SEEK_PENALTY_DESCRIPTOR,
-            GET_LENGTH_INFORMATION, IOCTL_DISK_GET_LENGTH_INFO, IOCTL_STORAGE_QUERY_PROPERTY,
-            STORAGE_DEVICE_DESCRIPTOR, STORAGE_PROPERTY_ID, STORAGE_PROPERTY_QUERY,
-            STORAGE_PROTOCOL_DATA_DESCRIPTOR_EXT, STORAGE_PROTOCOL_SPECIFIC_DATA_EXT,
-            STORAGE_QUERY_TYPE,
+            GET_LENGTH_INFORMATION, IOCTL_DISK_GET_LENGTH_INFO, IOCTL_STORAGE_GET_DEVICE_NUMBER,
+            IOCTL_STORAGE_QUERY_PROPERTY, STORAGE_DEVICE_DESCRIPTOR, STORAGE_DEVICE_NUMBER,
+            STORAGE_PROPERTY_ID, STORAGE_PROPERTY_QUERY, STORAGE_PROTOCOL_DATA_DESCRIPTOR_EXT,
+            STORAGE_PROTOCOL_SPECIFIC_DATA_EXT, STORAGE_QUERY_TYPE,
         },
         IO::DeviceIoControl,
     },
@@ -165,21 +165,31 @@ impl Drop for PhysicalDrive {
 }
 
 impl PhysicalDrive {
-    /// 打开 `\\.\PhysicalDriveN`
+    /// 打开 `\\.\PhysicalDriveN`（读写句柄，SMART 透传要求）
     ///
     /// 打开失败返回错误（权限不足 → NeedsAdmin；不存在 → NotFound）。
     fn open(index: u32) -> Result<Self, CollectError> {
+        Self::open_with_access(index, GENERIC_READ | GENERIC_WRITE)
+    }
+
+    /// 以指定访问级别打开 `\\.\PhysicalDriveN`
+    ///
+    /// - `GENERIC_READ | GENERIC_WRITE`：SMART/ATA 透传（需管理员）
+    /// - `0`（查询句柄）：仅查询型 IOCTL（描述符/NVMe 协议特定查询/容量），
+    ///   **普通用户可打开**——v3.0.0 磁盘温度采集的用户态通道
+    fn open_with_access(index: u32, desired_access: u32) -> Result<Self, CollectError> {
         let path = format!("\\\\.\\PhysicalDrive{}", index);
         let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
 
-        // SAFETY: CreateFileW 宽字符串以 NUL 结尾；dwDesiredAccess=GENERIC_READ|GENERIC_WRITE，
+        // SAFETY: CreateFileW 宽字符串以 NUL 结尾；dwDesiredAccess 由调用方决定，
         // SMART 透传（IOCTL_ATA_PASS_THROUGH / 协议特定查询）要求读写句柄，只读打开会返回
         // ERROR_ACCESS_DENIED / ERROR_INVALID_PARAMETER（v0.20.x 全盘 IOCTL 失败根因之一）；
+        // 查询句柄（0）仅允许查询型 IOCTL，普通用户合法。
         // 共享模式允许其他进程读写（SMART 查询不应独占磁盘），OPEN_EXISTING 不创建文件。
         let handle = unsafe {
             windows_sys::Win32::Storage::FileSystem::CreateFileW(
                 wide.as_ptr(),
-                GENERIC_READ | GENERIC_WRITE,
+                desired_access,
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                 std::ptr::null(),
                 OPEN_EXISTING,
@@ -1166,6 +1176,137 @@ fn wmi_media_type_label(media: Option<u16>) -> String {
         Some(4) => "SSD".to_string(),
         _ => "未知".to_string(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// 磁盘温度快照（v3.0.0 原生迁移：替代 LHM Storage 域；用户态零提权）
+// ---------------------------------------------------------------------------
+
+/// 单物理盘温度采样（传感器快照消费；Clone 供上层 TTL 缓存）
+#[derive(Debug, Clone, Serialize)]
+pub struct DiskTempSample {
+    /// 物理盘号（\\.\PhysicalDriveN 的 N；卷盘符经 volume_physical_map 关联到此）
+    pub physical_index: u32,
+    /// 型号（StorageDeviceProperty ProductId；空 = 未取得）
+    pub model: String,
+    /// 总线类型标签（NVMe / SATA / ATA / USB / SCSI / 其他）
+    pub bus: String,
+    /// 温度 ℃（NVMe 健康日志 Composite Temperature；None = 非 NVMe 或查询失败）
+    pub temp_c: Option<f32>,
+}
+
+/// 枚举全部物理盘温度（**0 访问权限句柄**，普通用户可执行）
+///
+/// 权限语义（v3.0.0 原生迁移）：
+/// - NVMe：`StorageAdapterProtocolSpecificProperty` 查询健康日志 Composite 温度。
+///   先以 0 访问句柄尝试（非管理员合法）；部分 stornvme 驱动版本对协议特定查询
+///   校验句柄读取权限会拒绝（ERROR_ACCESS_DENIED）→ 以 GENERIC_READ 句柄重试
+///   （管理员环境可通；非管理员维持 unavailable 如实标注）；
+/// - SATA/ATA：温度在 SMART 属性表（0xC2/0xBE），属性表经 `IOCTL_ATA_PASS_THROUGH`
+///   透传需要读写句柄（管理员）→ 非管理员恒不可得，temp=None 如实标注；
+/// - USB/其他总线：桥不支持温度查询 → None。
+pub fn disk_temperature_samples() -> Vec<DiskTempSample> {
+    let mut out = Vec::new();
+    for index in 0..64u32 {
+        // 查询句柄（访问级别 0）：不做任何 SMART 透传，普通用户合法
+        let drive = match PhysicalDrive::open_with_access(index, 0) {
+            Ok(d) => d,
+            Err(CollectError::NotFound { .. }) => break, // 盘号连续，缺号即枚举结束
+            Err(e) => {
+                log::debug!("disk.temp: 磁盘 {} 打开失败（跳过）: {}", index, e);
+                continue;
+            }
+        };
+        let info = match read_disk_info(&drive) {
+            Ok(i) => i,
+            Err(e) => {
+                log::debug!("disk.temp: 磁盘 {} 描述符读取失败（跳过）: {}", index, e);
+                continue;
+            }
+        };
+        let temp_c = if info.interface_type == "NVMe" {
+            match read_nvme_health(&drive) {
+                Ok(h) => Some(h.temperature_c as f32).filter(|t| *t > 0.0 && *t < 120.0),
+                Err(_) => {
+                    // 0 访问句柄被驱动拒绝：GENERIC_READ 句柄重试（管理员环境可通；
+                    // 非管理员 CreateFileW 即失败 → 维持不可用，如实标注）
+                    match PhysicalDrive::open_with_access(index, GENERIC_READ) {
+                        Ok(drv_rw) => read_nvme_health(&drv_rw)
+                            .ok()
+                            .map(|h| h.temperature_c as f32)
+                            .filter(|t| *t > 0.0 && *t < 120.0),
+                        Err(_) => None,
+                    }
+                }
+            }
+        } else {
+            None
+        };
+        out.push(DiskTempSample {
+            physical_index: index,
+            model: info.model,
+            bus: info.interface_type,
+            temp_c,
+        });
+    }
+    out
+}
+
+/// 卷盘符 → 物理盘号映射（`IOCTL_STORAGE_GET_DEVICE_NUMBER`，0 访问句柄，用户态）
+///
+/// 键 = 盘符 "C:"（与 sensor_service DiskData.drive_key 一致）；
+/// 值 = \\.\PhysicalDriveN 的 N。软盘/光驱/断开的映射卷打开失败自然跳过。
+pub fn volume_physical_map() -> std::collections::HashMap<String, u32> {
+    use windows_sys::Win32::Storage::FileSystem::CreateFileW;
+
+    let mut map = std::collections::HashMap::new();
+    for c in b'A'..=b'Z' {
+        let letter = c as char;
+        let path = format!("\\\\.\\{}:", letter);
+        let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+
+        // SAFETY: 宽字符串 NUL 结尾；访问级别 0 的卷句柄仅可做查询型 IOCTL，普通用户合法
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            continue;
+        }
+
+        // SAFETY: 输出缓冲大小 = STORAGE_DEVICE_NUMBER 大小；IOCTL 失败时忽略内容
+        let mut sdn: STORAGE_DEVICE_NUMBER = unsafe { std::mem::zeroed() };
+        let mut returned: u32 = 0;
+        let ok = unsafe {
+            DeviceIoControl(
+                handle,
+                IOCTL_STORAGE_GET_DEVICE_NUMBER,
+                std::ptr::null(),
+                0,
+                &mut sdn as *mut _ as *mut core::ffi::c_void,
+                std::mem::size_of::<STORAGE_DEVICE_NUMBER>() as u32,
+                &mut returned,
+                std::ptr::null_mut(),
+            )
+        };
+        // SAFETY: 句柄由 CreateFileW 成功返回，读完后必须关闭
+        unsafe { CloseHandle(handle) };
+
+        if ok != 0 {
+            map.insert(
+                format!("{}:", letter.to_ascii_uppercase()),
+                sdn.DeviceNumber,
+            );
+        }
+    }
+    map
 }
 
 // ---------------------------------------------------------------------------

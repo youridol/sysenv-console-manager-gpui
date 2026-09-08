@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2.11.0"
+version = "3.1.0"
 edition = "2021"
 license = "MIT"
 authors = ["SysEnv Console Manager"]
@@ -23,6 +23,8 @@ log = { version = "0.4", features = ["std"] }
 ureq = "2"
 winreg = "0.56"
 windows-sys = "0.61"
+# GPU 原生采集（NVIDIA NVML；运行时 dlopen 驱动自带 nvml.dll，非管理员可读）
+nvml-wrapper = "0.10"
 
 [profile.dev]
 opt-level = 0

@@ -4,12 +4,14 @@
 // 的 grid 子树在 `overflow_y_scroll` 滚动容器内不产出可渲染布局（v2.9.1 审计实证：
 // 页头/背景正常、网格子树零像素），全应用已验证渲染路径均为 flex。
 //
-// 功能面（v2.9.1 补齐）：
+// 功能面（v3.1 整理）：
 // - 每秒轮询传感器（CPU 占用/频率/温度、内存、磁盘 —— SensorService 快照）；
 // - CPU/GPU/内存 60 秒趋势图 + 下载/上传速率趋势图（sensor_history 1s 节拍采样，
 //   JSON 持久化 %LOCALAPPDATA%\SECM\cache\，跨重启恢复）；
-// - 网络流量卡：总量/各网卡源切换、0.5s–5s 可调采样间隔（GetIfTable2 累计字节
-//   差分，无 PDH ≥1s 限制）、活跃 TCP 连接数、链路协商速度；
+//   上行四卡（CPU/内存/GPU/网络速率趋势）等高，趋势波形统一贴卡片底部对齐；
+// - 网络流量卡：仅展示**已连接**网卡的链接信息（名称/协商速度/IPv4/实时 ↓↑ 速率，
+//   link_speed 非空判定）+ 活跃 TCP 连接数；v3.1 移除数据源/采样间隔档位与
+//   UI 侧单网卡采样任务（数据全部来自统一快照，1s 节拍）；
 // - 磁盘存储卡：型号/容量/用量条 + SMART 健康状态（正常绿/风险关注黄/告警红 + 温度）。
 
 use gpui::prelude::*;
@@ -29,8 +31,6 @@ use crate::ui::page::{
     page_root, sparkline, sparkline_empty, status_pill, ButtonKind,
 };
 
-/// 网络采样间隔档位（秒）
-const NET_INTERVALS: [(f32, &str); 4] = [(0.5, "0.5s"), (1.0, "1s"), (2.0, "2s"), (5.0, "5s")];
 /// 行内两卡横向间距（与页级纵向节奏 PAGE_GAP 一致，统一 20px 网格感）
 const ROW_GAP: f32 = 20.0;
 
@@ -48,19 +48,6 @@ pub struct DashboardView {
     hist_mem: Vec<HistoryPoint>,
     hist_rx: Vec<HistoryPoint>,
     hist_tx: Vec<HistoryPoint>,
-    // ---- 网络流量卡 ----
-    /// 采样间隔（秒；0.5/1/2/5，UI 档位切换后下一拍生效）
-    net_interval: f32,
-    /// 数据源：None=总量；Some(别名)=单网卡
-    net_source: Option<String>,
-    /// 每网卡实时速率（别名, 下行 KB/s, 上行 KB/s；名称升序）
-    net_rates: Vec<(String, f32, f32)>,
-    /// 总量速率（下行, 上行 KB/s）
-    net_total: (f32, f32),
-    /// 活跃 TCP 连接数（ESTABLISHED）
-    tcp_estab: u32,
-    /// 接口别名 → 链路协商速度
-    link_speeds: HashMap<String, String>,
     // ---- 磁盘存储 + SMART ----
     disks: Vec<DiskListItem>,
     disks_loading: bool,
@@ -89,12 +76,6 @@ impl DashboardView {
             hist_mem: hs.mem,
             hist_rx: hs.rx,
             hist_tx: hs.tx,
-            net_interval: 1.0,
-            net_source: None,
-            net_rates: Vec::new(),
-            net_total: (0.0, 0.0),
-            tcp_estab: 0,
-            link_speeds: HashMap::new(),
             disks: Vec::new(),
             disks_loading: false,
             smart: HashMap::new(),
@@ -102,7 +83,6 @@ impl DashboardView {
             disk_error: String::new(),
         };
         view.schedule_refresh(cx);
-        view.start_net_sampler(cx);
         view.load_disks(cx);
         view
     }
@@ -146,75 +126,6 @@ impl DashboardView {
                         view.hist_tx = hist.tx;
                         cx.notify();
                     });
-                }
-            },
-        )
-        .detach();
-    }
-
-    /// 网络采样任务：间隔可调（0.5–5s，每拍重读生效）。
-    /// 数据源 = SensorService 统一快照（ADR-0005：UI 不触达底层采集 API；
-    /// GetIfTable2 差分由采集服务唯一执行，本任务纯消费快照数值）。
-    /// 快照粒度 1s：0.5s 档位仅在快照更新时记录新点（updated_at_ms 去重）。
-    fn start_net_sampler(&mut self, cx: &mut Context<Self>) {
-        cx.spawn(
-            async move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
-                let mut last_snap_ms: u64 = 0;
-                loop {
-                    // 每拍重读间隔（档位切换下一拍生效，无需重启任务）
-                    let interval_ms = match this.update(cx, |v, _| (v.net_interval * 1000.0) as u64)
-                    {
-                        Ok(ms) => ms.max(200),
-                        Err(_) => return, // 视图已释放
-                    };
-                    Timer::after(Duration::from_millis(interval_ms)).await;
-                    let ok = this.update(cx, |v, cx| {
-                        let snap = SensorService::snapshot();
-                        // 快照网络域时间戳（per-NIC 速率采集时刻）
-                        let snap_ms = snap
-                            .net
-                            .interfaces
-                            .first()
-                            .map(|i| i.rx_kbps.updated_at_ms)
-                            .unwrap_or(0);
-                        if snap_ms != 0 && snap_ms == last_snap_ms {
-                            return; // 快照未更新（0.5s 档位内），跳过重复记录
-                        }
-                        last_snap_ms = snap_ms;
-
-                        let rates: Vec<(String, f32, f32)> = snap
-                            .net
-                            .interfaces
-                            .iter()
-                            .map(|i| {
-                                (
-                                    i.name.clone(),
-                                    i.rx_kbps.value_or(0.0),
-                                    i.tx_kbps.value_or(0.0),
-                                )
-                            })
-                            .collect();
-                        let total = rates
-                            .iter()
-                            .fold((0.0f32, 0.0f32), |a, (_, r, t)| (a.0 + r, a.1 + t));
-                        v.net_rates = rates.clone();
-                        v.net_total = total;
-                        v.tcp_estab = snap.net.tcp_established;
-                        v.link_speeds = snap
-                            .net
-                            .interfaces
-                            .iter()
-                            .filter(|i| !i.link_speed.is_empty())
-                            .map(|i| (i.name.clone(), i.link_speed.clone()))
-                            .collect();
-                        let refs: Vec<(String, f32, f32)> =
-                            rates.iter().map(|(n, r, t)| (n.clone(), *r, *t)).collect();
-                        sensor_history::record_adapter_rates(&refs);
-                        cx.notify();
-                    });
-                    if ok.is_err() {
-                        return;
-                    }
                 }
             },
         )
@@ -305,7 +216,9 @@ impl DashboardView {
             .child(card_header_accent(pal, title.to_string(), dot))
             .child(card_divider(pal))
             .child(
+                // flex_1：撑满卡片剩余高度（行内四卡等高），使下方趋势波形贴卡底
                 card_body(pal)
+                    .flex_1()
                     .child(metric_value(pal, main))
                     // 卡内纵向节奏用显式 mt（容器纵向 gap 在 taffy 0.9.0 不生效）
                     .child(div().mt_2().flex_col().children(stats.into_iter().map(
@@ -327,9 +240,10 @@ impl DashboardView {
                         },
                     )))
                     .child(
-                        // 趋势子组：标签紧贴图表（组内 4px），与统计行间隔 8px
+                        // 趋势子组：标签紧贴图表（组内 4px）；mt_auto 推到卡底
+                        //（v3.1：CPU/内存/GPU/网络速率趋势四卡波形底部统一对齐）
                         div()
-                            .mt_2()
+                            .mt_auto()
                             .flex_col()
                             .gap_1()
                             .child(
@@ -454,7 +368,7 @@ impl DashboardView {
             None => {
                 let stats = vec![(
                     pal.text_muted,
-                    "未检测到 GPU（LHM 不可用或无独显）".to_string(),
+                    "未检测到 GPU（NVML/DXGI 未枚举到适配器）".to_string(),
                     None,
                 )];
                 self.stat_card(
@@ -634,11 +548,15 @@ impl DashboardView {
     fn net_trend_card(&self, pal: &Palette) -> Div {
         let rx_60 = window_vals(&self.hist_rx);
         let tx_60 = window_vals(&self.hist_tx);
+        // 当前总量速率（直接对统一快照求和；与 sensor_history 1s 节拍同源）
+        let (total_rx, total_tx) = net_total_now(&self.snap);
         card(pal)
             .child(card_header_accent(pal, "网络速率趋势", pal.accent))
             .child(card_divider(pal))
             .child(
+                // flex_1：撑满卡片剩余高度（行内四卡等高），使下方上行波形贴卡底
                 card_body(pal)
+                    .flex_1()
                     .gap_2()
                     .child(
                         div()
@@ -658,7 +576,7 @@ impl DashboardView {
                                             .text_color(pal.text)
                                             .child(SharedString::from(format!(
                                                 "↓ 下行 {}",
-                                                fmt_kbps(self.net_total.0)
+                                                fmt_kbps(total_rx)
                                             ))),
                                     ),
                             )
@@ -675,7 +593,7 @@ impl DashboardView {
                                             .text_color(pal.text)
                                             .child(SharedString::from(format!(
                                                 "↑ 上行 {}",
-                                                fmt_kbps(self.net_total.1)
+                                                fmt_kbps(total_tx)
                                             ))),
                                     ),
                             ),
@@ -699,9 +617,9 @@ impl DashboardView {
                             }),
                     )
                     .child(
-                        // 上行趋势子组：标签紧贴图表
+                        // 上行趋势子组：mt_auto 推到卡底（v3.1：四卡波形底部统一对齐）
                         div()
-                            .mt_2()
+                            .mt_auto()
                             .flex_col()
                             .gap_1()
                             .child(
@@ -719,212 +637,122 @@ impl DashboardView {
             )
     }
 
-    /// 网络流量卡：源切换 + 间隔档位 + 各网卡速率 + TCP 连接数 + 协商速度
-    fn net_traffic_card(&self, pal: &Palette, cx: &mut Context<Self>) -> Div {
-        // 源档位：总量 + 各网卡（上限 6 个，避免行溢出）
-        let sources: Vec<Option<String>> = std::iter::once(None)
-            .chain(
-                self.net_rates
-                    .iter()
-                    .take(6)
-                    .map(|(n, _, _)| Some(n.clone())),
-            )
+    /// 网络流量卡：仅展示**已连接**网卡的链接信息（v3.1 简化）。
+    /// "已连接" = 链路协商速度已生效（link_speed 非空）；每张已连接网卡展示
+    /// 名称 / 协商速度 / IPv4 / 实时 ↓↑ 速率，头部概览 = 连接数 + 活跃 TCP 连接数。
+    /// 数据全部来自统一快照（1s 节拍），不再有数据源/采样间隔档位与 UI 侧采样任务。
+    fn net_traffic_card(&self, pal: &Palette) -> Div {
+        // 已连接网卡（快照接口序 = 名称升序，稳定不抖动）
+        let connected: Vec<&secm_core::sensor::NetIfStat> = self
+            .snap
+            .net
+            .interfaces
+            .iter()
+            .filter(|i| !i.link_speed.is_empty())
             .collect();
-        let selected = self.net_source.clone();
-        let tcp = self.tcp_estab;
 
-        // 展示行：按流量降序取 8；选中源强制保留
-        let mut rows: Vec<&(String, f32, f32)> = self.net_rates.iter().collect();
-        rows.sort_by(|a, b| {
-            let at = a.1 + a.2;
-            let bt = b.1 + b.2;
-            bt.partial_cmp(&at).unwrap_or(std::cmp::Ordering::Equal)
-        });
-        rows.truncate(8);
-        if let Some(sel) = &selected {
-            if !rows.iter().any(|(n, _, _)| n == sel) {
-                if let Some(r) = self.net_rates.iter().find(|(n, _, _)| n == sel) {
-                    rows.insert(0, r);
-                }
-            }
-        }
+        let mut body = card_body(pal).flex_1();
 
-        // 协商速度：选中网卡优先，否则取流量最大的已连接口
-        let speed_line = {
-            let name = selected
-                .clone()
-                .or_else(|| self.net_rates.first().map(|(n, _, _)| n.clone()));
-            name.and_then(|n| self.link_speeds.get(&n).cloned().map(|sp| (n, sp)))
-                .map(|(n, sp)| format!("协商速度 {}（{}）", sp, n))
-                .unwrap_or_else(|| "协商速度 —".to_string())
-        };
-
-        let mut body = card_body(pal);
-
-        // 数据源档位行
+        // 概览行：连接数 + 活跃 TCP 连接数
         body = body.child(
             div()
                 .flex()
-                .flex_wrap()
                 .items_center()
-                .gap_1p5()
-                .child(
-                    div()
-                        .text_size(px(10.5))
-                        .text_color(pal.text_dim)
-                        .child("数据源"),
-                )
-                .children(sources.into_iter().map(|src| {
-                    let is_sel = src == selected;
-                    let label = src.clone().unwrap_or_else(|| "总量".to_string());
-                    let src_c = src.clone();
-                    let kind = if is_sel {
-                        ButtonKind::Primary
-                    } else {
-                        ButtonKind::Ghost
-                    };
-                    button_sm(pal, kind)
-                        .id(SharedString::from(format!("net-src-{}", label)))
-                        .child(label)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.net_source = src_c.clone();
-                            cx.notify();
-                        }))
-                })),
+                .justify_between()
+                .child(div().text_size(px(10.5)).text_color(pal.text_dim).child(
+                    SharedString::from(format!("已连接 {} 张网卡", connected.len())),
+                ))
+                .child(status_pill(
+                    pal,
+                    SharedString::from(format!("TCP 活跃 {}", self.snap.net.tcp_established)),
+                    pal.accent,
+                )),
         );
 
-        // 采样间隔档位行 + TCP 连接数（与上一段间隔 8px —— 显式 mt）
-        body = body.child(
-            div()
-                .mt_2()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap_1p5()
-                .child(
-                    div()
-                        .text_size(px(10.5))
-                        .text_color(pal.text_dim)
-                        .child("采样间隔"),
-                )
-                .children(NET_INTERVALS.iter().map(|(val, label)| {
-                    let is_sel = (self.net_interval - val).abs() < f32::EPSILON;
-                    let val_c = *val;
-                    let kind = if is_sel {
-                        ButtonKind::Primary
-                    } else {
-                        ButtonKind::Ghost
-                    };
-                    button_sm(pal, kind)
-                        .id(SharedString::from(format!("net-int-{}", label)))
-                        .child((*label).to_string())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.net_interval = val_c;
-                            log::info!("硬件信息 · 网络采样间隔 → {}s", val_c);
-                            cx.notify();
-                        }))
-                }))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .flex()
-                        .justify_end()
-                        .child(status_pill(
-                            pal,
-                            SharedString::from(format!("TCP 活跃 {}", tcp)),
-                            pal.accent,
-                        )),
-                ),
-        );
-
-        // 当前源速率大字
-        let (cur_rx, cur_tx) = match &selected {
-            Some(name) => self
-                .net_rates
-                .iter()
-                .find(|(n, _, _)| n == name)
-                .map(|(_, r, t)| (*r, *t))
-                .unwrap_or((0.0, 0.0)),
-            None => self.net_total,
-        };
-        body = body.child(
-            div()
-                .mt_2()
-                .flex()
-                .items_baseline()
-                .gap_3()
-                .child(
-                    div()
-                        .text_size(px(15.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(pal.text)
-                        .child(SharedString::from(format!("↓ {}", fmt_kbps(cur_rx)))),
-                )
-                .child(
-                    div()
-                        .text_size(px(15.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(pal.text)
-                        .child(SharedString::from(format!("↑ {}", fmt_kbps(cur_tx)))),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.5))
-                        .text_color(pal.text_dim)
-                        .child(SharedString::from(speed_line)),
-                ),
-        );
-
-        // 各网卡速率行（与上一段间隔 8px —— 显式 mt；行距 4px 用 py 承担）
-        if rows.is_empty() {
+        if connected.is_empty() {
             body = body.child(
                 div()
                     .mt_2()
                     .py_2()
                     .text_size(px(11.5))
                     .text_color(pal.text_muted)
-                    .child("等待网络采样…"),
+                    .child("无已连接的网卡"),
             );
         } else {
-            body = body.child(div().mt_2().flex_col().children(rows.into_iter().map(
-                |(name, rx, tx)| {
-                    let is_sel = selected.as_deref() == Some(name.as_str());
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .px_2()
-                        .py(px(3.0))
-                        .rounded(px(6.0))
-                        .when(is_sel, |s| s.bg(pal.bg_hover))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .truncate()
-                                .text_size(px(12.0))
-                                .text_color(if is_sel { pal.text } else { pal.text_muted })
-                                .child(SharedString::from(name.clone())),
-                        )
-                        .child(
-                            div()
-                                .w(px(92.0))
-                                .flex_none()
-                                .text_size(px(11.0))
-                                .text_color(pal.text_muted)
-                                .child(SharedString::from(format!("↓ {}", fmt_kbps(*rx)))),
-                        )
-                        .child(
-                            div()
-                                .w(px(92.0))
-                                .flex_none()
-                                .text_size(px(11.0))
-                                .text_color(pal.text_muted)
-                                .child(SharedString::from(format!("↑ {}", fmt_kbps(*tx)))),
-                        )
-                },
-            )));
+            body = body.child(
+                div()
+                    .mt_2()
+                    .flex_col()
+                    .gap_2()
+                    .children(connected.iter().map(|i| {
+                        div()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                // 行 1：名称（左）+ 协商速度（右）
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .min_w(px(0.0))
+                                            .truncate()
+                                            .text_size(px(12.5))
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .text_color(pal.text)
+                                            .child(SharedString::from(i.name.clone())),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_size(px(10.5))
+                                            .text_color(pal.text_dim)
+                                            .child(SharedString::from(i.link_speed.clone())),
+                                    ),
+                            )
+                            .child(
+                                // 行 2：IPv4（左）+ 实时 ↓↑ 速率（右）
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(0.0))
+                                            .truncate()
+                                            .text_size(px(11.0))
+                                            .text_color(pal.text_muted)
+                                            .child(SharedString::from(if i.ipv4.is_empty() {
+                                                "IPv4 —".to_string()
+                                            } else {
+                                                format!("IPv4 {}", i.ipv4)
+                                            })),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_size(px(11.0))
+                                            .text_color(pal.text_muted)
+                                            .child(SharedString::from(format!(
+                                                "↓ {}",
+                                                fmt_kbps(i.rx_kbps.value_or(0.0))
+                                            ))),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_size(px(11.0))
+                                            .text_color(pal.text_muted)
+                                            .child(SharedString::from(format!(
+                                                "↑ {}",
+                                                fmt_kbps(i.tx_kbps.value_or(0.0))
+                                            ))),
+                                    ),
+                            )
+                    })),
+            );
         }
 
         card(pal)
@@ -947,7 +775,7 @@ impl Render for DashboardView {
         let gpu = self.gpu_card(&pal, &s).flex_1().min_w(px(0.0));
         let disk = self.disk_card(&pal, cx).flex_1().min_w(px(0.0));
         let trend = self.net_trend_card(&pal).flex_1().min_w(px(0.0));
-        let traffic = self.net_traffic_card(&pal, cx).flex_1().min_w(px(0.0));
+        let traffic = self.net_traffic_card(&pal).flex_1().min_w(px(0.0));
         let row = |a: gpui::Div, b: gpui::Div| div().flex().gap(px(ROW_GAP)).child(a).child(b);
         let row4 = |a: gpui::Div, b: gpui::Div, c: gpui::Div, d: gpui::Div| {
             div()
@@ -1036,6 +864,16 @@ fn disk_temp(sv: &DiskSmartView) -> Option<f32> {
         .iter()
         .find(|a| a.id == 194 || a.id == 190)
         .map(|a| a.value as f32)
+}
+
+/// 当前网络总量速率 (下行, 上行 KB/s)（统一快照 per-NIC 求和；与趋势序列同源）
+fn net_total_now(snap: &SensorSnapshot) -> (f32, f32) {
+    snap.net
+        .interfaces
+        .iter()
+        .fold((0.0f32, 0.0f32), |(rx, tx), i| {
+            (rx + i.rx_kbps.value_or(0.0), tx + i.tx_kbps.value_or(0.0))
+        })
 }
 
 /// 取 60s 窗口内的数值序列（趋势图渲染输入）

@@ -1,5 +1,112 @@
 # 更新日志
 
+## [v3.1.0] - 2026-09-08
+### 修复 + 新增（MINOR：CPU 温度 ring0 通道恢复 + 硬件信息页布局/网络卡整理）
+
+- **修复：CPU 温度恒 unavailable 的 BUG（v3.0.0 回归）**：
+  - 根因：v3.0.0 删除 sidecar 时把本机已有的 ring0 采集能力一并丢失——
+    实机（Administrator + 已部署 PawnIO 2.2.0）本可读出真实温度；
+  - 新增 `secm-datasource::cpu_temp`：PawnIO 设备（`\\.\PawnIO`）直连签名模块
+    直读 CPU 温度寄存器——**进程内 IOCTL，零 HTTP/零子进程**；
+    - AMD Zen（family 0x17/0x19/0x1A）：AMDFamily17 模块 `ioctl_read_smn` 读
+      SMN `THM_TCON_CUR_TMP(0x59800)`，`(raw>>21)*125*0.001`，RANGE_SEL/TJ_SEL
+      标志置位时 −49（Linux k10temp/LHM 等价公式）；
+    - Intel：IntelMSR 模块 `ioctl_read_msr` 读 IA32_TEMPERATURE_TARGET(0x1A2)
+      取 TjMax + IA32_PACKAGE_THERM_STATUS(0x1B1) 取 Package 偏移
+      （LHM IntelCpu 等价公式）；
+    - 模块 bin 提取自 LibreHardwareMonitorLib 嵌入资源（MPL-2.0），独立文件
+      存放 third_party/PawnIO/modules/ 随包分发（文件级隔离合规），经
+      include_bytes! 编入二进制，运行时无外部文件依赖；
+    - 权限语义不变：PawnIO 设备 DACL 仅 SYSTEM/Administrators——非管理员
+      环境/未部署 PawnIO → 如实 unavailable（含明确诊断文案），不伪造不提权；
+    - 模块句柄进程级单例 + 失败永久缓存（避免每秒重试 IOCTL）；厂商/family
+      经注册表 CentralProcessor\0 探测分流；新增单测（SMN 解算 + IOCTL 码）。
+  - 实测（Ryzen 7 7800X3D）：Tctl = 70.5 → 68.9 → 67.4 → 65.1°C 动态真实值，
+    来源标注 `[pawnio]`；新增 `Source::PawnIo` 来源枚举（来源可追溯）。
+- **布局：上行四卡趋势波形统一底部对齐**：
+  - CPU / 内存 / GPU / 网络速率趋势卡等高容器内，`card_body` 改 flex_1 撑满
+    剩余高度，趋势子组 `mt_auto` 贴底——四卡波形底边统一与 CPU 卡对齐；
+- **整理：网络流量卡仅显示已连接网卡的链接信息**：
+  - 移除数据源档位 / 采样间隔档位 / 按流量排序的混杂行（UI 侧 0.5–5s 采样
+    任务与单网卡序列死代码一并删除）；
+  - 新展示：概览行（已连接 N 张网卡 + TCP 活跃连接数）+ 每张**已连接**网卡
+    （link_speed 已协商）的 名称/协商速度/IPv4/实时 ↓↑ 速率；
+  - `NetIfStat` 新增 `ipv4` 字段（GetAdaptersAddresses per-NIC 映射），接口
+    按名称升序稳定排序（防 UI 行抖动）。
+
+## [v3.0.0] - 2026-09-08
+### 变更（MAJOR：硬件数据采集架构去 HTTP 化 —— Rust 原生采集 + GPUI 直接消费）
+
+- **破坏性架构改造：硬件采集链路彻底移除 HTTP/localhost/JSON 传输**：
+  - 删除 `secm-core::lhm`（LHM sidecar HTTP 客户端：ureq → 127.0.0.1:45980
+    /health、/api/lhm/sensors、/api/shutdown 全链路）；
+  - 删除 `sidecar-lhm/`（.NET 8 HTTP 服务端 + UAC 提权 + LibreHardwareMonitorLib
+    隔离进程）——应用不再启动任何独立 HTTP Server/子进程作为硬件采集层；
+  - 删除 `secm-core::sensor_match`（FanMapper/MOBO.Temp/电池符号启发式——随
+    sidecar 主板域下线，电池符号改由 SystemBatteryState 充放电标志直接给出）；
+  - 应用退出清理简化：`on_app_quit` 仅趋势历史落盘，无 sidecar 需要关闭。
+- **新增原生 GPU 采集（secm-datasource::gpu，零 HTTP 零提权）**：
+  - NVIDIA 实时指标：NVML（nvml-wrapper 运行时 dlopen 驱动自带 nvml.dll）——
+    温度/功耗/时钟/负载/显存，普通用户可读；
+  - 全厂商适配器枚举：DXGI `IDXGIFactory1::EnumAdapters1`——名称 + 专用显存
+    总量（AMD/Intel/其他可见，新增 `windows 0.61` 依赖复用既有编译单元）；
+  - 合并策略：DXGI 基准列表 + 名称归一/序位配对关联 NVML 设备；
+  - AMD/Intel 温度/功耗如实 unavailable（ADLX/IGCL 无用户态 Rust 可用 API），
+    GPU 风扇 RPM 如实 unavailable（NVML 仅提供占空比百分比，不伪造 RPM）。
+- **新增原生磁盘温度采集（secm-datasource::disk 扩展，用户态）**：
+  - NVMe：`IOCTL_STORAGE_QUERY_PROPERTY` 协议特定查询健康日志 Composite
+    温度，**0 访问权限句柄打开物理盘，非管理员可用**；
+  - 卷盘符 → 物理盘号映射：`IOCTL_STORAGE_GET_DEVICE_NUMBER`（用户态），
+    DiskData.temperature 按真实物理盘关联（取代旧按名称模糊匹配）；
+  - SATA/ATA 温度需管理员 SMART 透传 → 如实 unavailable；5s TTL 缓存降频。
+- **新增原生电池采集（secm-datasource::power 扩展，全用户态）**：
+  - `CallNtPowerInformation(SystemBatteryState)`：电量推算（RemainingCapacity/
+    MaxCapacity）、充放电功率（Rate，符号由 Charging/Discharging 标志给出）、
+    AC/充放电状态；GetSystemPowerStatus 回退；
+  - 电压/电流：Windows 用户态 API 不提供 → 恒 unavailable，不推算伪造。
+- **新增内存 SPD 型号采集（secm-datasource::memory）**：
+  - WMI `Win32_PhysicalMemory`（用户态）：条数 × 容量 + 代际 + PartNumber
+    汇总，静态数据一次查询缓存（替代 LHM DIMM 节点名）。
+- **权限边界明确化（v3 核心语义）**：
+  - CPU 温度/功耗/电压、主板 SuperIO 传感器为 ring0 专属（MSR/RAPL/SMU 需
+    内核驱动）→ 非管理员 Windows 下物理不可得，`Metric::unavailable` 如实
+    标注原因；不伪造、不提权、不经 HTTP 绕过、不要求应用以管理员运行；
+  - `Source` 枚举移除 `Lhm`，新增 `Nvml`/`Dxgi`，全指标来源可追溯
+    （UI 指标 → SensorSnapshot 字段 → Sensor Manager → Native Backend）。
+- **性能**：单拍采集 = NVML(毫秒级) + NVMe IOCTL(毫秒级，5s TTL) + PDH/NtPower
+  (不变)；对比旧链路每 2s HTTP 请求 + JSON 序列化 + sidecar 1s 采集轮询，
+  延迟与开销均下降；采集全部运行于后台 sensor-service 线程，UI 线程零参与。
+- **验证**：`cargo check`/`cargo test`/`cargo clippy`/`cargo build --release`
+  全部通过；`hw_verify` 示例重写为原生采集验证工具（多帧打印 值/来源/错误）。
+
+## [v2.12.0] - 2026-09-08
+### 新增（MINOR：/cleanup 清理优化页对齐上游全能力面 —— 进程管理补全 + 执行结果追溯）
+
+- **进程管理补全**（对齐上游 Cleanup.tsx）：
+  - 名称/PID 双通道搜索：新增 `secm_core::cleanup::process_matches`（名称大小写不敏感
+    包含 + PID 串包含），修复历史搜索框仅匹配进程名、PID 过滤从未接线的问题；
+  - **Top 200 全量可视化**：进程表改 `gpui::uniform_list` 虚拟化渲染（仅可见行进入
+    元素树，等高 44px 行，表头固定于滚动区外），弃用旧 take(50) 截断；
+  - **6 档优先级行内设置**：低/较低/标准/较高/高/实时（`PRIORITY_LEVELS` 常量单一
+    真源，与后端 Win32 PriorityClass 映射共用档位 id），替代旧 3 档（低/标准/高）；
+  - 空态区分："正在加载进程列表…" / "无匹配进程，请调整搜索条件"；卡片头显示
+    "共 N 个 · 显示 M 个"。
+- **执行结果追溯**（对齐上游执行结果区 + 右侧边栏日志面板）：
+  - 页内历史列表（最新在前，容量 50，完成时刻 HH:MM:SS）：时间 · 操作 · 状态点 ·
+    释放量，点击任意历史行可回看该次完整明细；
+  - 明细区逐行渲染结果消息（[完成时刻] 前缀 + 行文本），头部统计徽标
+    "N 成功 · M 失败"；
+  - **右侧日志流对接**：清理/DNS/优先级全部操作的完成摘要 + 结果明细逐行写入 log
+    （失败/错误/无法/标记重启后删除行以 Warn 呈现），右侧边栏日志面板全程可追溯；
+  - `set_process_priority` 的 operation 携带 PID（"设置进程优先级 (PID=N)"），
+    追溯日志可定位目标进程。
+- **对齐审计结论**（上游 v1.19.0 cleanup.rs + Cleanup.tsx vs 本地 GPUI 版）：
+  DNS 缓存刷新（dnsapi.DnsFlushResolverCache 直连，优于上游 ipconfig 文本匹配旧路径）、
+  临时文件清理（TEMP / Windows Temp / Prefetch）、工作集修剪（需管理员门禁）、
+  着色器缓存清理（NVIDIA / AMD / DirectX / Steam 全部库目录 + CS2 深度缓存 +
+  一键全清 + 占用文件标记重启后删除）均已对齐，本轮仅补全上述缺口。
+- 新增单测：process_matches（名称/PID/空关键词边界）、PRIORITY_LEVELS 6 档与后端映射一致性。
+
 ## [v2.11.0] - 2026-09-08
 ### 新增（MINOR：LiteMonitor 硬件采集迁移落地 + 硬件信息页布局/图表重制）
 

@@ -35,5 +35,13 @@ winreg.workspace = true
 thiserror.workspace = true
 serde = { version = "1", features = ["derive"] }
 log.workspace = true
-# P1 激活状态 / P2 补丁兜底：WMI 查询
+# P1 激活状态 / P2 补丁兜底 / v3 内存 SPD 型号：WMI 查询
 wmi = "0.18"
+# v3 GPU 原生采集（NVIDIA NVML 用户态指标；运行时加载驱动自带 nvml.dll）
+nvml-wrapper.workspace = true
+# v3 GPU 适配器枚举（DXGI COM 接口仅在 windows crate 提供；windows-sys 0.61 无 DXGI 模块）
+# 0.61 与 gpui 等既有依赖同版本，共享编译单元，不引入新编译开销
+windows = { version = "0.61", default-features = false, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dxgi",
+] }

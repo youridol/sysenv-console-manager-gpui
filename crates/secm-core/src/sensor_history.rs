@@ -5,25 +5,20 @@
 //   速率（KB/s），写入有界序列；
 // - 序列持久化到 %LOCALAPPDATA%\SECM\cache\sensor_history.json（脏后 10s 落盘 +
 //   flush() 退出兜底），应用重启时恢复 —— 趋势图不因重启清零；
-// - 网络流量卡的可调间隔（0.5s–5s）采样由 UI 侧驱动（DashboardView 网络采样任务），
-//   经 record_adapter_rates 写入单网卡序列（仅内存态，不持久化）；总量序列以本模块
-//   1s 节拍为准（避免双写）。
 //
 // 速率语义（ADR-0006 去重）：网络速率来自统一快照（SensorService 的 GetIfTable2
 // 差分，唯一采集点），本模块求和为总量序列；不再独立触达 GetIfTable2。
+// v3.1：原单网卡序列（record_adapter_rates）随网络流量卡简化一并移除。
 //
 // 线程模型：专职 std::thread 采样（与 SensorService 同款模式）；
 // parking_lot::Mutex 保护状态；GetIfTable2 为微秒级同步调用，不阻塞 UI（S8）。
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// 主序列最大点数（1800 点 ≈ 30 分钟 @1s，控制持久化体积）
 const MAX_POINTS: usize = 1800;
-/// 单网卡序列最大点数（240 点 @0.5s ≈ 2 分钟窗口）
-const ADAPTER_MAX_POINTS: usize = 240;
 /// 落盘脏检查周期（毫秒）
 const SAVE_INTERVAL_MS: u64 = 10_000;
 /// 趋势图窗口（毫秒；UI 取"最近 60s"）
@@ -56,9 +51,6 @@ struct HistoryState {
     mem: Vec<HistoryPoint>,
     rx: Vec<HistoryPoint>,
     tx: Vec<HistoryPoint>,
-    /// 单网卡序列（仅内存态；UI 可调间隔采样写入）
-    adapter_rx: HashMap<String, Vec<HistoryPoint>>,
-    adapter_tx: HashMap<String, Vec<HistoryPoint>>,
     dirty: bool,
 }
 
@@ -199,41 +191,6 @@ pub fn snapshot_series_window(window_ms: u64) -> HistorySnapshot {
         rx: take(&g.rx),
         tx: take(&g.tx),
     }
-}
-
-/// 记录单网卡实时速率（UI 网络采样任务回填；仅内存态，不持久化）
-pub fn record_adapter_rates(samples: &[(String, f32, f32)]) {
-    if samples.is_empty() {
-        return;
-    }
-    let t = now_ms();
-    let mut g = state().lock();
-    for (name, rx, tx) in samples {
-        push(
-            g.adapter_rx.entry(name.clone()).or_default(),
-            HistoryPoint { t, v: *rx },
-            ADAPTER_MAX_POINTS,
-        );
-        push(
-            g.adapter_tx.entry(name.clone()).or_default(),
-            HistoryPoint { t, v: *tx },
-            ADAPTER_MAX_POINTS,
-        );
-    }
-}
-
-/// 读取单网卡序列 (下行, 上行)（最近 window_ms 窗口；无该网卡历史返回空）
-pub fn adapter_series_window(name: &str, window_ms: u64) -> (Vec<HistoryPoint>, Vec<HistoryPoint>) {
-    let g = state().lock();
-    let cutoff = now_ms().saturating_sub(window_ms);
-    let take = |s: &Vec<HistoryPoint>| -> Vec<HistoryPoint> {
-        let start = s.partition_point(|p| p.t < cutoff);
-        s[start..].to_vec()
-    };
-    (
-        g.adapter_rx.get(name).map(take).unwrap_or_default(),
-        g.adapter_tx.get(name).map(take).unwrap_or_default(),
-    )
 }
 
 /// 退出兜底：脏时立即落盘（on_app_quit 调用）

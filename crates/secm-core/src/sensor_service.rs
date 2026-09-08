@@ -1,23 +1,25 @@
-// secm-core::sensor_service — 统一硬件采集服务（ADR-0005/0006）
+// secm-core::sensor_service — 统一硬件采集服务（ADR-0005/0006；v3.0.0 纯原生零 HTTP）
 //
-// 架构：后台线程 1s 轮询 → 唯一写入 HardwareSnapshot → UI 只读。
-// 每指标唯一权威来源（audit/metric-mapping.md）：
+// 架构：后台线程 1s 轮询 → 唯一写入 SensorSnapshot → UI 只读。
+// 采集层全部为进程内 Rust 模块直调（secm-datasource），无 HTTP/localhost/JSON
+// 反序列化链路（原 LHM sidecar HTTP 客户端已随 v3.0.0 移除）。
+// 每指标唯一权威来源（v3.0.0 原生迁移）：
 //   CPU.Load   = PDH % Processor Utility（LiteMonitor 主路径）→ sysinfo 差分回退
 //   CPU.Clock  = cpu_freq 降级链 ntapi→PDH→registry
-//   温度/功耗/电压/风扇/GPU/主板/磁盘温度/电池 = sidecar LHM
-//   内存       = sysinfo（GlobalMemoryStatusEx 等价）
+//   CPU 温度/功耗/电压 = ring0 专属（MSR/RAPL/SuperIO 需内核驱动）→ 非管理员恒不可用（如实标注）
+//   GPU.*      = NVML（NVIDIA 用户态实时）+ DXGI（全厂商名称/显存）— datasource::gpu
+//   内存       = sysinfo（GlobalMemoryStatusEx 等价）+ WMI Win32_PhysicalMemory（SPD 型号，静态缓存）
 //   磁盘 IO/活动 = PDH PhysicalDisk（LiteMonitor PerfCounter 等价）
 //   磁盘容量   = sysinfo Disks（DriveInfo 等价）
-//   网络       = GetIfTable2 差分（LiteMonitor LHM Throughput 等价底层）
-//   AC 状态    = GetSystemPowerStatus（LiteMonitor PowerStatus 等价）
-// 智能匹配（MOBO.Temp 策略 / FanMapper / 电池符号）= sensor_match。
+//   磁盘温度   = IOCTL NVMe 健康日志（用户态；SATA 需管理员透传 → 不可用）
+//   主板/SuperIO = ring0 专属 → 快照恒 None（如实不可用）
+//   网络       = GetIfTable2 差分（LiteMonitor Throughput 等价底层）
+//   电池       = CallNtPowerInformation(SystemBatteryState) + GetSystemPowerStatus（全用户态）
 
-use crate::lhm::LhmSensorResponse;
 use crate::sensor::{
-    unix_now_ms, BatteryData, CpuData, DiskData, GpuData, MemoryData, Metric, MotherboardData,
-    MotherboardSensor, NetIfStat, NetSnapshot, SensorSnapshot, Source,
+    unix_now_ms, BatteryData, CpuData, DiskData, GpuData, MemoryData, Metric, NetIfStat,
+    NetSnapshot, SensorSnapshot, Source, StorageTemp,
 };
-use crate::sensor_match;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -95,21 +97,19 @@ struct NetDiffState {
     prev: Option<(u64, HashMap<String, (u64, u64)>)>,
 }
 
-/// 采集一帧统一快照（ADR-0005：Collector → Normalized HardwareSnapshot）
+/// 采集一帧统一快照（ADR-0005：Collector → Normalized SensorSnapshot；v3 全原生）
 fn collect_snapshot(sys: &mut sysinfo::System) -> SensorSnapshot {
     let now = unix_now_ms();
     sys.refresh_cpu_usage();
     sys.refresh_memory();
 
-    // ---- LHM sidecar（温度/功耗/电压/GPU/主板/磁盘温度/电池；低频 ensure + 2s 缓存）----
-    ensure_lhm_periodic();
-    let (lhm_resp, lhm_diag) = crate::lhm::snapshot();
-    let lhm_ok = matches!(&lhm_resp, Some(r) if r.available);
+    // ---- GPU（NVML + DXGI，进程内直调；零 HTTP）----
+    let gpu = collect_gpu(now);
 
     // ---- CPU ----
-    let cpu = collect_cpu(sys, lhm_resp.as_ref(), &lhm_diag, now);
+    let cpu = collect_cpu(sys, now);
 
-    // ---- 内存（GlobalMemoryStatusEx 等价；LHM SPD 型号补充）----
+    // ---- 内存（GlobalMemoryStatusEx 等价；WMI SPD 型号静态缓存）----
     let mem_total = sys.total_memory();
     let mem_used = sys.used_memory();
     let mem_avail = mem_total.saturating_sub(mem_used);
@@ -118,68 +118,26 @@ fn collect_snapshot(sys: &mut sysinfo::System) -> SensorSnapshot {
     } else {
         0.0
     };
-    let mut memory = MemoryData {
+    let memory = MemoryData {
         total: mem_total,
         used: mem_used,
         available: mem_avail,
         usage_percent: mem_pct,
-        model_name: String::new(),
-    };
-    if let Some(r) = &lhm_resp {
-        if let Some(m) = &r.memory {
-            if let Some(n) = &m.name {
-                if !n.is_empty() {
-                    memory.model_name = n.clone();
-                }
-            }
-        }
-    }
-
-    // ---- GPU（LHM）----
-    let gpu: Vec<GpuData> = match lhm_resp.as_ref() {
-        Some(r) => r
-            .gpu
-            .iter()
-            .map(|g| GpuData {
-                name: g.name.clone(),
-                usage: opt_metric(g.load_percent, now, "GPU 负载传感器不可用"),
-                temperature: opt_metric(g.temperature_c, now, "GPU 温度传感器不可用"),
-                clock_mhz: opt_metric(g.core_clock_mhz, now, "GPU 时钟传感器不可用"),
-                power_w: opt_metric(g.power_w, now, "GPU 功耗传感器不可用"),
-                vram_used: opt_metric_u64(
-                    g.memory_used_bytes.map(|b| b as u64),
-                    now,
-                    "显存已用传感器不可用",
-                ),
-                vram_total: opt_metric_u64(
-                    g.memory_total_bytes.map(|b| b as u64),
-                    now,
-                    "显存总量传感器不可用",
-                ),
-                fan_rpm: opt_metric(g.fan_rpm, now, "GPU 风扇传感器不可用"),
-            })
-            .collect(),
-        None => Vec::new(),
+        model_name: spd_model_cached(),
     };
 
-    // ---- 主板（LHM 原始列表 + 智能匹配产出）----
-    let motherboard = lhm_resp
-        .as_ref()
-        .and_then(|r| r.motherboard.as_ref())
-        .map(|m| collect_motherboard(m, now));
-
-    // ---- 磁盘（容量 sysinfo + IO/活动 PDH + 温度 LHM Storage）----
-    let disks = collect_disks(sys, lhm_resp.as_ref(), now);
+    // ---- 磁盘（容量 sysinfo + IO/活动 PDH + 温度 NVMe 健康日志 5s TTL）----
+    let (disks, storage_temps, disk_diag) = collect_disks(now);
 
     // ---- 网络（GetIfTable2 差分；唯一权威来源）----
     let net = collect_net(now);
 
-    // ---- 电池（LHM Battery 原始值 + AC 符号修正）----
-    let battery = collect_battery(lhm_resp.as_ref(), now);
+    // ---- 电池（SystemBatteryState + GetSystemPowerStatus，全用户态）----
+    let battery = collect_battery(now);
 
     // ---- 诊断串 ----
     let mut diag = format!(
-        "CPU={:.1}%({}) FREQ={} MEM={:.0}% disks={}",
+        "CPU={:.1}%({}) FREQ={} MEM={:.0}% disks={} gpu={}",
         cpu.usage,
         cpu.usage_source.as_str(),
         cpu.clock_mhz
@@ -187,10 +145,11 @@ fn collect_snapshot(sys: &mut sysinfo::System) -> SensorSnapshot {
             .map(|v| format!("{:.0}MHz/{}", v, cpu.clock_mhz.source.as_str()))
             .unwrap_or_else(|| "n/a".into()),
         mem_pct,
-        disks.len()
+        disks.len(),
+        gpu.len(),
     );
-    if !lhm_ok && !lhm_diag.is_empty() {
-        diag.push_str(&format!(" LHM=n/a({})", lhm_diag));
+    if !disk_diag.is_empty() {
+        diag.push_str(&format!(" DISK[{}]", disk_diag));
     }
 
     SensorSnapshot {
@@ -198,33 +157,19 @@ fn collect_snapshot(sys: &mut sysinfo::System) -> SensorSnapshot {
         gpu,
         memory,
         disks,
-        motherboard,
+        // 主板/SuperIO 域：ring0 专属（需内核驱动 + 管理员），v3 起如实不可用
+        motherboard: None,
         net,
         battery,
-        // LHM Storage 温度列表（按 LHM 硬件名；30s 慢速刷新）
-        storage_temps: lhm_resp
-            .as_ref()
-            .map(|r| {
-                r.storage
-                    .iter()
-                    .map(|st| crate::sensor::StorageTemp {
-                        name: st.name.clone(),
-                        temp: opt_metric(st.temp_c, now, "盘温度传感器不可用（30s 慢速刷新）"),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
+        storage_temps,
         diag,
     }
 }
 
-/// CPU 域采集：负载（PDH Utility → sysinfo 差分回退）+ 频率（cpu_freq 链）+ LHM 温度/功耗/电压
-fn collect_cpu(
-    sys: &mut sysinfo::System,
-    lhm: Option<&LhmSensorResponse>,
-    lhm_diag: &str,
-    now: u64,
-) -> CpuData {
+/// CPU 域采集：负载（PDH Utility → sysinfo 差分回退）+ 频率（cpu_freq 链）；
+/// 温度/功耗/电压为 ring0 专属（MSR/RAPL/SuperIO 需内核驱动），非管理员环境
+/// 物理不可得 → 如实 unavailable（v3.0.0 原生迁移：不再经 sidecar 提权获取）
+fn collect_cpu(sys: &mut sysinfo::System, now: u64) -> CpuData {
     // 负载：LiteMonitor 主路径 PDH % Processor Utility；回退 sysinfo 差分（% Processor Time 语义）
     let (usage, usage_source) = match secm_datasource::cpu_load::get_cpu_load() {
         Some(v) => (v, Source::PerfCounter),
@@ -250,16 +195,16 @@ fn collect_cpu(
         _ => Metric::unavailable(format!("频率不可用: {}", freq_reason)),
     };
 
-    // LHM 温度/功耗/电压（sidecar 已做 package 匹配与电压排除规则）
-    let unavail = || Metric::unavailable(lhm_unavailable_reason(lhm, lhm_diag));
-    let (temperature, power_w, voltage) = match lhm {
-        Some(r) if r.available => (
-            opt_metric(r.cpu.package_temp_c, now, "CPU 温度传感器不可用"),
-            opt_metric(r.cpu.power_w, now, "CPU 功耗传感器不可用"),
-            opt_metric(r.cpu.voltage_v, now, "CPU 电压传感器不可用"),
-        ),
-        _ => (unavail(), unavail(), unavail()),
+    // 温度：PawnIO ring0 直读（v3.1.0 BUG 修复：管理员 + 已部署 PawnIO 时恢复
+    // 真实 CPU 温度；非管理员/未部署 PawnIO → 如实 unavailable，不伪造）
+    let temperature = match secm_datasource::cpu_temp::read_cpu_temperature() {
+        Ok(t) => Metric::available(t, Source::PawnIo, now),
+        Err(e) => Metric::unavailable(format!("CPU 温度不可用：{e}")),
     };
+    // 功耗/电压：ring0 专属（RAPL/SMU/SuperIO），本轮未接入 → 如实 unavailable
+    const RING0_CPU_REST: &str = "需 ring0 内核寄存器（RAPL/SMU，管理员权限），当前不可用";
+    let power_w = Metric::<f32>::unavailable(RING0_CPU_REST);
+    let voltage = Metric::<f32>::unavailable(RING0_CPU_REST);
 
     CpuData {
         name,
@@ -271,68 +216,21 @@ fn collect_cpu(
         temperature,
         power_w,
         voltage,
-        // CPU 风扇在主板域匹配（sensor_match::match_fans），由快照消费者读 motherboard.cpu_fan_rpm
-        fan_rpm: Metric::unavailable("见 motherboard.cpu_fan_rpm"),
+        // CPU 风扇在主板域匹配（SuperIO ring0 专属；v3 起如实不可用）
+        fan_rpm: Metric::unavailable("CPU 风扇转速需 SuperIO ring0 读取（管理员权限），当前不可用"),
     }
 }
 
-/// LHM 不可用原因（快照域错误文本）
-fn lhm_unavailable_reason(lhm: Option<&LhmSensorResponse>, diag: &str) -> String {
-    if let Some(r) = lhm {
-        if let Some(e) = &r.error {
-            return format!("LHM 不可用: {}", e);
-        }
-    }
-    if !diag.is_empty() {
-        return format!("LHM 不可用: {}", diag);
-    }
-    "LHM 不可用（sidecar 未就绪）".into()
-}
-
-/// 主板域采集：原始传感器列表 + MOBO.Temp 策略 + FanMapper 等价匹配
-fn collect_motherboard(m: &crate::lhm::LhmMotherboardData, now: u64) -> MotherboardData {
-    let sensors: Vec<MotherboardSensor> = m
-        .sensors
-        .iter()
-        .map(|s| MotherboardSensor {
-            name: s.name.clone(),
-            kind: s.kind.clone(),
-            hw: s.hw.clone(),
-            value: s.value,
-        })
-        .collect();
-
-    // MOBO.Temp（LiteMonitor SensorMap 智能策略）+ 硬上限校验
-    let system_temp = sensor_match::match_system_temp(&sensors)
-        .and_then(sensor_match::validate_mobo_temp)
-        .map(|v| Metric::available(v, Source::Lhm, now))
-        .unwrap_or_else(|| Metric::unavailable("主板温度传感器未匹配（需 LHM + ring0 驱动）"));
-
-    // 风扇/水泵（LiteMonitor FanMapper 等价）
-    let fm = sensor_match::match_fans(&sensors);
-    let fan_metric = |v: Option<f32>| match v {
-        Some(rpm) => Metric::available(rpm, Source::Lhm, now),
-        None => Metric::unavailable("风扇传感器未匹配（需 LHM + ring0 驱动）"),
-    };
-
-    MotherboardData {
-        name: m.name.clone(),
-        sensors,
-        system_temp,
-        cpu_fan_rpm: fan_metric(fm.cpu_fan),
-        cpu_pump_rpm: fan_metric(fm.cpu_pump),
-        case_fan_rpm: fan_metric(fm.case_fan),
-    }
-}
-
-/// 磁盘域采集：容量（sysinfo）+ IO/活动（PDH）+ 温度（LHM Storage）
-fn collect_disks(
-    _sys: &mut sysinfo::System,
-    lhm: Option<&LhmSensorResponse>,
-    now: u64,
-) -> Vec<DiskData> {
+/// 磁盘域采集：容量（sysinfo）+ IO/活动（PDH）+ 温度（NVMe 健康日志，5s TTL 缓存）
+///
+/// 返回 (卷列表, 物理盘温度列表, 磁盘域诊断)。温度关联：卷盘符 →
+/// `IOCTL_STORAGE_GET_DEVICE_NUMBER` 物理盘号 → NVMe 温度采样；
+/// 非 NVMe（SATA/ATA 温度需管理员透传）→ 如实 unavailable。
+fn collect_disks(now: u64) -> (Vec<DiskData>, Vec<StorageTemp>, String) {
     let io_map = secm_datasource::disk_io::get_disk_io_sample_map();
+    let (temp_samples, temp_map) = disk_temp_snapshot(now);
     let mut disks = Vec::new();
+    let mut diag_unmatched = 0usize;
     for d in sysinfo::Disks::new_with_refreshed_list().list() {
         let total = d.total_space();
         let avail = d.available_space();
@@ -362,21 +260,20 @@ fn collect_disks(
                 Metric::unavailable("PDH % Disk Time 通道不可用"),
             ),
         };
-        // 盘温度：LHM Storage（30s 慢速刷新；名称匹配 sysinfo 卷名不可靠，按序对位由
-        // UI 层展示全列表——此处以盘符无法对应 LHM Storage 名，温度暂挂全局列表）
-        // 设计：DiskData.temperature 仅在 drive_key 与 LHM storage 名含该盘符时填充；
-        // LHM Storage 名一般含型号不含盘符 → 温度主要在 motherboard/独立列表展示。
-        // 为保证"每指标唯一来源"，温度在此按名称尽力匹配（无法匹配 → 不可用，不伪造）。
-        let temperature = lhm
-            .and_then(|r| {
-                r.storage.iter().find(|st| {
-                    !st.name.is_empty()
-                        && (mount.contains(&st.name) || st.name.contains(&drive_key))
-                })
+        // 盘温度：卷盘符 → 物理盘号 → NVMe 健康日志温度（全用户态，v3 原生）。
+        // 关联失败/非 NVMe → 如实 unavailable（区分诊断文案，不伪造）。
+        let temperature = temp_map
+            .get(&drive_key)
+            .and_then(|pi| temp_samples.iter().find(|s| s.physical_index == *pi))
+            .map(|s| (s.temp_c, s.bus.clone()))
+            .map(|(temp_c, bus)| match temp_c {
+                Some(t) => Metric::available(t, Source::Smart, now),
+                None => Metric::unavailable(disk_temp_reason(&bus)),
             })
-            .and_then(|st| st.temp_c)
-            .map(|t| Metric::available(t, Source::Lhm, now))
-            .unwrap_or_else(|| Metric::unavailable("LHM Storage 温度未匹配（30s 慢速刷新）"));
+            .unwrap_or_else(|| {
+                diag_unmatched += 1;
+                Metric::unavailable("盘温度：卷未关联到物理盘（映射不可得）")
+            });
 
         disks.push(DiskData {
             name: d.name().to_string_lossy().to_string(),
@@ -391,13 +288,144 @@ fn collect_disks(
             temperature,
         });
     }
-    disks
+    // 物理盘温度列表（硬件页/仪表盘独立展示；名称 = 型号 + 物理盘号）
+    let storage_temps = temp_samples
+        .iter()
+        .map(|s| StorageTemp {
+            name: if s.model.is_empty() {
+                format!("PhysicalDrive{}", s.physical_index)
+            } else {
+                format!("{}（PhysicalDrive{}）", s.model, s.physical_index)
+            },
+            temp: s
+                .temp_c
+                .map(|t| Metric::available(t, Source::Smart, now))
+                .unwrap_or_else(|| Metric::unavailable(disk_temp_reason(&s.bus))),
+        })
+        .collect();
+
+    let diag = if diag_unmatched > 0 {
+        format!("{} 个卷未关联物理盘温度", diag_unmatched)
+    } else {
+        String::new()
+    };
+    (disks, storage_temps, diag)
+}
+
+/// 磁盘温度不可用原因（按总线类型区分，如实标注权限边界）
+fn disk_temp_reason(bus: &str) -> String {
+    match bus {
+        "NVMe" => "NVMe 健康日志查询失败".to_string(),
+        "SATA" | "ATA" => {
+            "SATA 温度需管理员 SMART 透传（IOCTL_ATA_PASS_THROUGH），非管理员不可用".to_string()
+        }
+        other => format!("{} 总线不支持温度查询", other),
+    }
+}
+
+/// 磁盘温度快照缓存（5s TTL：温度为慢变指标，降低 IOCTL 频次；首拍立即采集）
+/// 缓存载荷：(采集时刻 Unix ms, 物理盘温度采样, 卷盘符 → 物理盘号)
+type DiskTempCacheEntry = (
+    u64,
+    Vec<secm_datasource::disk::DiskTempSample>,
+    HashMap<String, u32>,
+);
+static DISK_TEMP_CACHE: Mutex<Option<DiskTempCacheEntry>> = Mutex::new(None);
+const DISK_TEMP_TTL_MS: u64 = 5000;
+
+/// 读取磁盘温度采样 + 卷→物理盘映射（TTL 缓存命中直接复用）
+fn disk_temp_snapshot(
+    now: u64,
+) -> (
+    Vec<secm_datasource::disk::DiskTempSample>,
+    HashMap<String, u32>,
+) {
+    {
+        let cache = DISK_TEMP_CACHE.lock();
+        if let Some((t, samples, map)) = cache.as_ref() {
+            if now.saturating_sub(*t) < DISK_TEMP_TTL_MS {
+                return (samples.clone(), map.clone());
+            }
+        }
+    }
+    // 进程内直调 datasource（同步 IOCTL，采集线程执行，不触 UI 线程）
+    let samples = secm_datasource::disk::disk_temperature_samples();
+    let map = secm_datasource::disk::volume_physical_map();
+    *DISK_TEMP_CACHE.lock() = Some((now, samples.clone(), map.clone()));
+    (samples, map)
+}
+
+/// GPU 域采集：NVML（NVIDIA 实时）+ DXGI（全厂商名称/显存），进程内直调
+fn collect_gpu(now: u64) -> Vec<GpuData> {
+    secm_datasource::gpu::sample_gpus()
+        .into_iter()
+        .map(|g| {
+            // 非 NVIDIA 卡：实时指标无用户态来源（ADLX/IGCL 为厂商专有 SDK）→ 如实 unavailable
+            let nv_only = |v: Option<f32>, what: &str| match v {
+                Some(x) => Metric::available(x, Source::Nvml, now),
+                None => Metric::unavailable(format!(
+                    "{}：仅 NVIDIA NVML 提供用户态采集（AMD 需 ADLX / Intel 需 IGCL，均非用户态公开 API）",
+                    what
+                )),
+            };
+            GpuData {
+                name: g.name.clone(),
+                usage: nv_only(g.load_percent, "GPU 负载"),
+                temperature: nv_only(g.temperature_c, "GPU 温度"),
+                clock_mhz: nv_only(g.core_clock_mhz, "GPU 时钟"),
+                power_w: nv_only(g.power_w, "GPU 功耗"),
+                vram_used: match g.memory_used_bytes {
+                    Some(b) => Metric::available(b, Source::Nvml, now),
+                    None => Metric::unavailable("显存已用：仅 NVIDIA NVML 提供用户态采集"),
+                },
+                vram_total: match g.memory_total_bytes {
+                    // NVIDIA 卡取 NVML 值；AMD/Intel 卡取 DXGI DedicatedVideoMemory（全厂商可用）
+                    Some(b) if g.load_percent.is_some() || g.temperature_c.is_some() => {
+                        Metric::available(b, Source::Nvml, now)
+                    }
+                    Some(b) => Metric::available(b, Source::Dxgi, now),
+                    None => Metric::unavailable("显存总量不可得（DXGI/NVML 均未提供）"),
+                },
+                // NVML 风扇为占空比百分比、非 RPM → 无真实 RPM 来源，不伪造
+                fan_rpm: Metric::unavailable(
+                    "GPU 风扇 RPM 无用户态来源（NVML 仅提供占空比百分比）",
+                ),
+            }
+        })
+        .collect()
+}
+
+/// 内存 SPD 型号（WMI Win32_PhysicalMemory；静态数据仅查询一次缓存）
+fn spd_model_cached() -> String {
+    static SPD: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    SPD.get_or_init(|| match secm_datasource::memory::spd_model_summary() {
+        Some(s) => {
+            log::info!("传感器 · 内存 SPD 型号（WMI）：{}", s);
+            Some(s)
+        }
+        None => {
+            log::info!("传感器 · 内存 SPD 型号不可得（WMI 查询无结果）");
+            None
+        }
+    })
+    .clone()
+    .unwrap_or_default()
 }
 
 /// 网络域采集：GetIfTable2 差分（per-NIC 速率 + 累计字节）+ 本地 IPv4 + TCP 连接数
 fn collect_net(now: u64) -> NetSnapshot {
     let bytes = secm_datasource::netif::if_bytes_map();
     let t = now;
+
+    // per-NIC IPv4（GetAdaptersAddresses 一次取全；网络流量卡"已连接网卡链接信息"用）
+    let ipv4_map: HashMap<String, String> = secm_datasource::netif::adapter_configs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|a| {
+            let ip = a.ipv4.iter().find(|ip| !ip.starts_with("169.254."))?;
+            Some((a.name.clone(), ip.clone()))
+        })
+        .collect();
 
     let mut state = NET_DIFF.lock();
     let rates: HashMap<String, (f32, f32)> = match state.prev {
@@ -475,7 +503,7 @@ fn collect_net(now: u64) -> NetSnapshot {
     };
 
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let interfaces: Vec<NetIfStat> = bytes
+    let mut interfaces: Vec<NetIfStat> = bytes
         .iter()
         .filter(|(name, _)| !is_virtual(name) && seen.insert(name.to_ascii_uppercase()))
         .map(|(name, (in_oct, out_oct))| {
@@ -487,9 +515,13 @@ fn collect_net(now: u64) -> NetSnapshot {
                 in_octets: *in_oct,
                 out_octets: *out_oct,
                 link_speed: speeds.get(name).cloned().unwrap_or_default(),
+                ipv4: ipv4_map.get(name).cloned().unwrap_or_default(),
             }
         })
         .collect();
+
+    // 稳定展示顺序：按名称升序（HashMap 迭代序不稳定，防流量卡每秒行抖动）
+    interfaces.sort_by_key(|i| i.name.to_ascii_lowercase());
 
     // 本地 IPv4（首个非 APIPA 的 Up 网卡；GetAdaptersAddresses）
     let local_ipv4 = local_ipv4_from_adapters();
@@ -520,82 +552,54 @@ fn local_ipv4_from_adapters() -> String {
         .unwrap_or_default()
 }
 
-/// 电池域采集：LHM Battery 原始值 + AC 状态符号修正（LiteMonitor BatteryService 等价）
-fn collect_battery(lhm: Option<&LhmSensorResponse>, now: u64) -> Option<BatteryData> {
-    let bat = lhm?.battery.clone()?;
-    // AC 状态（GetSystemPowerStatus；失败沿用上次值由静态缓存处理——此处直接读，
-    // 失败时按 ac_online=false 保守处理会误标放电 → 失败时不修正符号更诚实）
+/// 电池域采集（v3 全用户态原生）：
+/// - SystemBatteryState（NtPower）：电量推算 / 充放电功率（符号由 Charging/Discharging
+///   标志直接给出，无需启发式修正）/ AC 状态；
+/// - GetSystemPowerStatus（Battery）：电量百分比回退 + 充电标志；
+/// - 电压/电流：Windows 用户态 API 不提供 → 恒 unavailable（不推算伪造）。
+fn collect_battery(now: u64) -> Option<BatteryData> {
+    let state = secm_datasource::power::get_battery_state();
     let power = secm_datasource::power::get_power_status();
-    let (ac_online, charging) = match power {
-        Some(p) => (p.ac_online, p.charging),
-        None => (true, false), // API 失败：不修正符号（abs 语义），标注为插电（多数台式机场景）
+
+    // 无电池判定：SystemBatteryState 无电池 且 GetSystemPowerStatus 无电量百分比
+    let battery_present =
+        state.is_some() || power.map(|p| p.battery_percent.is_some()).unwrap_or(false);
+    if !battery_present {
+        return None;
+    }
+
+    // AC/充电状态：SystemBatteryState 优先，GetSystemPowerStatus 回退
+    let (ac_online, charging) = match (&state, &power) {
+        (Some(s), _) => (s.ac_online, s.charging),
+        (None, Some(p)) => (p.ac_online, p.charging),
+        (None, None) => return None,
     };
+
+    // 电量 %：SystemBatteryState 容量推算优先（NtPower），GetSystemPowerStatus 回退（Battery）
+    let percent = match (&state, &power) {
+        (Some(s), _) if s.percent.is_some() => {
+            Metric::available(s.percent.unwrap(), Source::NtPower, now)
+        }
+        (_, Some(p)) if p.battery_percent.is_some() => {
+            Metric::available(p.battery_percent.unwrap() as f32, Source::Battery, now)
+        }
+        _ => Metric::unavailable("电池电量不可得（容量字段无效）"),
+    };
+
+    // 充放电功率 W（SystemBatteryState.Rate，符号已按充放电标志给出）
+    let power_w = state
+        .and_then(|s| s.power_w)
+        .map(|v| Metric::available(v, Source::NtPower, now))
+        .unwrap_or_else(|| {
+            Metric::unavailable("充放电功率不可得（SystemBatteryState 无有效速率）")
+        });
+
     Some(BatteryData {
-        percent: opt_metric(bat.percent, now, "电池电量传感器不可用"),
-        power_w: bat
-            .power_w
-            .map(|v| {
-                Metric::available(
-                    sensor_match::fix_battery_sign(v, ac_online),
-                    Source::Lhm,
-                    now,
-                )
-            })
-            .unwrap_or_else(|| Metric::unavailable("电池功率传感器不可用")),
-        current_a: bat
-            .current_a
-            .map(|v| {
-                Metric::available(
-                    sensor_match::fix_battery_sign(v, ac_online),
-                    Source::Lhm,
-                    now,
-                )
-            })
-            .unwrap_or_else(|| Metric::unavailable("电池电流传感器不可用")),
-        voltage_v: opt_metric(bat.voltage_v, now, "电池电压传感器不可用"),
+        percent,
+        power_w,
+        current_a: Metric::unavailable("Windows 用户态 API 不提供电池电流"),
+        voltage_v: Metric::unavailable("Windows 用户态 API 不提供电池电压"),
         ac_online,
         charging,
     })
-}
-
-/// Option<f32> → Metric（None → 不可用 + 诊断）
-fn opt_metric(v: Option<f32>, now: u64, err: &str) -> Metric<f32> {
-    match v {
-        Some(x) if x.is_finite() => Metric::available(x, Source::Lhm, now),
-        _ => Metric::unavailable(err),
-    }
-}
-
-/// Option<u64> → Metric（None → 不可用 + 诊断）
-fn opt_metric_u64(v: Option<u64>, now: u64, err: &str) -> Metric<u64> {
-    match v {
-        Some(x) => Metric::available(x, Source::Lhm, now),
-        None => Metric::unavailable(err),
-    }
-}
-
-/// LHM 低频 ensure（10s 节流：探测/启动开销不随 1s 轮询放大）
-///
-/// ensure_running 内部 wait_health 最长阻塞 ~10s（P1-4），故派发到独立线程执行，
-/// 不冻结 1s 采集线程；LAST 在派发时即推进，本次失败由下个 10s 窗口重试。
-/// `SECM_DISABLE_LHM=1` 时完全跳过（显式降级开关：无 sidecar 部署 / 验证环境
-/// 隔离 UAC 弹窗 / 排障），LHM 域指标按不可用处理，普通用户域不受影响。
-fn ensure_lhm_periodic() {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static LAST: AtomicU64 = AtomicU64::new(0);
-    if std::env::var("SECM_DISABLE_LHM").as_deref() == Ok("1") {
-        return;
-    }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let last = LAST.load(Ordering::Relaxed);
-    if now.saturating_sub(last) >= 10 {
-        LAST.store(now, Ordering::Relaxed);
-        // 派发失败（线程资源耗尽，极罕见）忽略：下个窗口重试
-        let _ = std::thread::Builder::new()
-            .name("lhm-ensure".into())
-            .spawn(crate::lhm::ensure_running);
-    }
 }

@@ -54,7 +54,7 @@ impl Render for AboutView {
             ),
             (
                 "温度传感",
-                "LHM sidecar (.NET 8, MPL-2.0 进程隔离)；WinRing0/ACPI 降级链为后续版本计划",
+                "纯 Rust 原生采集（PDH/Win32/NVML/DXGI/IOCTL/WMI），零 HTTP 零提权；CPU/SATA 盘温度需管理员 ring0，如实降级",
             ),
             ("平台", "Windows 10/11 (x64)"),
             ("许可证", "MIT"),

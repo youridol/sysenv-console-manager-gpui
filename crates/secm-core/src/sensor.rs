@@ -1,7 +1,7 @@
 // secm-core::sensor — 统一硬件快照数据契约 v2（ADR-0005）
 //
-// 架构（ADR-0005 统一 HardwareSnapshot）：
-//   Collector 层（secm-datasource + sidecar-lhm）
+// 架构（ADR-0005 统一 HardwareSnapshot；v3.0.0 起纯原生零 HTTP）：
+//   Collector 层（secm-datasource，进程内 Rust 直调）
 //     → secm-core::sensor_service（唯一写入者，1s 编排）
 //     → SensorSnapshot（本模块，UI 只读）
 //     → GPUI（dashboard / 侧栏 / 硬件页）
@@ -12,31 +12,39 @@
 // - source 记录实际来源（回退成功时为回退层，即 fallback_used 追踪）；
 // - error 保留最近一次失败诊断（core 保留，UI 可选择隐藏）；
 // - 结构稳定的基础域（CPU 占用/内存/容量）保留裸类型，失败由 diag 汇总。
+//
+// 权限边界（v3.0.0 明确区分"非管理员可用"与"能读全部传感器"）：
+// - ring0 专属指标（CPU 温度/功耗/电压、主板 SuperIO）在非管理员 Windows 下
+//   物理不可得 → Metric::unavailable 如实标注，不伪造、不提权、不经 HTTP 绕过。
 
 use serde::Serialize;
 
 // ============================================================================
-// 来源标识（对齐 ADR-0005 Source 枚举）
+// 来源标识（对齐 ADR-0005 Source 枚举；v3.0.0 原生迁移）
 // ============================================================================
 
-/// 数据来源（LiteMonitor 对应来源族；序列化为稳定字符串）
+/// 数据来源（序列化为稳定字符串；v3.0.0 移除 Lhm——sidecar HTTP 链路已删除）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub enum Source {
-    /// sidecar LibreHardwareMonitorLib（LiteMonitorLhm：温度/功耗/电压/风扇/GPU/主板/磁盘温度/电池）
-    Lhm,
+    /// NVIDIA NVML 用户态采集（GPU 温度/功耗/时钟/负载/显存；运行时加载驱动 nvml.dll）
+    Nvml,
+    /// DXGI 适配器枚举（全厂商 GPU 名称/专用显存总量，静态）
+    Dxgi,
+    /// PawnIO ring0 寄存器直读（CPU 温度：AMD SMN / Intel MSR；需管理员 + PawnIO 2.x）
+    PawnIo,
     /// Windows 性能计数器体系（LiteMonitorPerfCounter：PDH % Processor Utility、PhysicalDisk 等）
     PerfCounter,
     /// IPHLPAPI 原生网络（LiteMonitorNativeNetwork：GetIfTable2/GetAdaptersAddresses）
     NativeNetwork,
-    /// NtPowerInformation（CPU 频率实时层；LiteMonitor 未使用，为 SECM 增强层）
+    /// NtPowerInformation（CPU 频率实时层 + 电池充放电状态 SystemBatteryState）
     NtPower,
     /// 磁盘容量（LiteMonitorDriveInfo：GetDiskFreeSpaceExW 等价）
     DriveInfo,
     /// 注册表（标称频率保底层）
     Registry,
-    /// 电池/AC 电源（LiteMonitorBattery：sidecar Battery + GetSystemPowerStatus）
+    /// 电池/AC 电源（GetSystemPowerStatus：AC 状态/电量百分比）
     Battery,
-    /// SMART 按需域（硬件页独立功能）
+    /// SMART 域（NVMe 健康日志温度 = IOCTL 协议特定查询，用户态；SATA 温度需管理员透传）
     Smart,
     /// 不可用（无任何来源产出）
     #[default]
@@ -46,7 +54,9 @@ pub enum Source {
 impl Source {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Lhm => "lhm",
+            Self::Nvml => "nvml",
+            Self::Dxgi => "dxgi",
+            Self::PawnIo => "pawnio",
             Self::PerfCounter => "perfcounter",
             Self::NativeNetwork => "native_network",
             Self::NtPower => "ntpower",
@@ -137,33 +147,33 @@ pub struct CpuData {
     pub core_count: usize,
     /// 频率（ntapi → PDH → registry 标称降级链）
     pub clock_mhz: Metric<f32>,
-    /// Package 温度（LHM）
+    /// Package 温度 ℃（ring0 专属：MSR 需内核驱动；非管理员环境恒 unavailable）
     pub temperature: Metric<f32>,
-    /// Package 功耗 W（LHM）
+    /// Package 功耗 W（ring0 专属：RAPL/SMU 需内核驱动；非管理员环境恒 unavailable）
     pub power_w: Metric<f32>,
-    /// 核心电压 V（LHM）
+    /// 核心电压 V（ring0 专属：SuperIO/VRM 遥测需内核驱动；非管理员环境恒 unavailable）
     pub voltage: Metric<f32>,
-    /// CPU 风扇转速 RPM（FanMapper 等价匹配；主板/SuperIO 域）
+    /// CPU 风扇转速 RPM（ring0 专属：SuperIO 需内核驱动；见 motherboard.cpu_fan_rpm）
     pub fan_rpm: Metric<f32>,
 }
 
-/// GPU 数据（单卡一条）
+/// GPU 数据（单卡一条；来源 = NVML（NVIDIA 实时）+ DXGI（全厂商名称/显存））
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct GpuData {
     pub name: String,
-    /// 核心负载 %（LHM GPU Core）
+    /// 核心负载 %（NVML utilization.gpu；非 NVIDIA 恒 unavailable）
     pub usage: Metric<f32>,
-    /// 核心温度 ℃（LHM GPU Core + max 兜底）
+    /// 核心温度 ℃（NVML；非 NVIDIA 无用户态来源 → unavailable）
     pub temperature: Metric<f32>,
-    /// 核心时钟 MHz（LHM；>6000 熔断）
+    /// 核心时钟 MHz（NVML；非 NVIDIA 恒 unavailable）
     pub clock_mhz: Metric<f32>,
-    /// 功耗 W（LHM；>1200 熔断）
+    /// 功耗 W（NVML power_usage；非 NVIDIA 恒 unavailable）
     pub power_w: Metric<f32>,
-    /// 显存已用（字节）
+    /// 显存已用（字节；NVML，非 NVIDIA 恒 unavailable）
     pub vram_used: Metric<u64>,
-    /// 显存总量（字节）
+    /// 显存总量（字节；NVIDIA = NVML，AMD/Intel = DXGI DedicatedVideoMemory）
     pub vram_total: Metric<u64>,
-    /// 风扇转速 RPM
+    /// 风扇转速 RPM（NVML 仅提供占空比百分比非 RPM；无用户态 RPM 来源恒 unavailable）
     pub fan_rpm: Metric<f32>,
 }
 
@@ -195,7 +205,7 @@ pub struct MemoryData {
     pub used: u64,
     pub available: u64,
     pub usage_percent: f32,
-    /// 内存型号（LHM SPD 补充；无则空串）
+    /// 内存型号（WMI Win32_PhysicalMemory SPD 汇总，v3 原生；无则空串）
     pub model_name: String,
 }
 
@@ -216,11 +226,11 @@ pub struct DiskData {
     pub write_mbps: Metric<f32>,
     /// 活动时间 %（PDH % Disk Time；LiteMonitor DISK.Activity 等价）
     pub activity_pct: Metric<f32>,
-    /// 盘温度 ℃（LHM Storage；30s 慢速刷新）
+    /// 盘温度 ℃（v3 原生：NVMe 健康日志 IOCTL 用户态；SATA 需管理员透传 → unavailable）
     pub temperature: Metric<f32>,
 }
 
-/// LHM 主板原始传感器（SuperIO 子硬件；name 保留原始名）
+/// 主板原始传感器条目（SuperIO 子硬件；v3.0.0 起无数据源，类型保留维持契约稳定）
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct MotherboardSensor {
     pub name: String,
@@ -231,7 +241,8 @@ pub struct MotherboardSensor {
     pub value: f32,
 }
 
-/// 主板数据（原始传感器列表 + 智能匹配产出）
+/// 主板数据（原始传感器列表 + 智能匹配产出；v3.0.0 起快照恒 None——SuperIO 读
+/// 取需 ring0 内核驱动（管理员），非管理员环境不可得，如实不可用不伪造）
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct MotherboardData {
     pub name: Option<String>,
@@ -247,7 +258,7 @@ pub struct MotherboardData {
     pub case_fan_rpm: Metric<f32>,
 }
 
-/// 单网卡网络统计（GetIfTable2 差分；LiteMonitor LHM Throughput 等价）
+/// 单网卡网络统计（GetIfTable2 差分；原生 IPHLPAPI）
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct NetIfStat {
     /// 接口别名（GetAdaptersAddresses FriendlyName 同源）
@@ -261,6 +272,8 @@ pub struct NetIfStat {
     pub out_octets: u64,
     /// 链路协商速度（"1 Gbps"；空 = 未协商/未连接）
     pub link_speed: String,
+    /// 接口 IPv4（首个；无 = 空。v3.1：网络流量卡"已连接网卡链接信息"展示用）
+    pub ipv4: String,
 }
 
 /// 网络快照（原生 IPHLPAPI 域；唯一权威来源）
@@ -275,29 +288,29 @@ pub struct NetSnapshot {
     pub error: Option<String>,
 }
 
-/// 电池数据（LHM Battery；符号修正后）
+/// 电池数据（v3 原生：SystemBatteryState 充放电 + GetSystemPowerStatus AC 状态）
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct BatteryData {
-    /// 电量 %（LHM Charge Level）
+    /// 电量 %（SystemBatteryState RemainingCapacity/MaxCapacity，或 GetSystemPowerStatus 百分比）
     pub percent: Metric<f32>,
-    /// 功率 W（正=充电输入 / 负=放电输出；AC 符号修正）
+    /// 功率 W（正=充电输入 / 负=放电输出；SystemBatteryState Rate，用户态）
     pub power_w: Metric<f32>,
-    /// 电流 A（同符号语义）
+    /// 电流 A（Windows 用户态 API 不提供电池电压/电流 → 恒 unavailable，不推算伪造）
     pub current_a: Metric<f32>,
-    /// 电压 V
+    /// 电压 V（同上：无用户态来源 → 恒 unavailable）
     pub voltage_v: Metric<f32>,
-    /// 是否接通外接电源（GetSystemPowerStatus；符号修正依据）
+    /// 是否接通外接电源（GetSystemPowerStatus ACLineStatus / SystemBatteryState AcOnLine）
     pub ac_online: bool,
     /// 是否正在充电
     pub charging: bool,
 }
 
-/// 磁盘温度快照（LHM Storage 域；name = LHM 硬件节点名，如型号）
+/// 磁盘温度快照（v3 原生 NVMe 域；name = 型号 + PhysicalDriveN）
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct StorageTemp {
-    /// 磁盘名（LHM Storage 节点名，如 "Samsung SSD 980 PRO"）
+    /// 磁盘名（"Samsung SSD 980 PRO（PhysicalDrive0）"；无型号退化为盘号）
     pub name: String,
-    /// 盘温度 ℃（30s 慢速刷新；无有效传感器 → 不可用）
+    /// 盘温度 ℃（NVMe 健康日志；SATA 需管理员透传 → unavailable）
     pub temp: Metric<f32>,
 }
 
@@ -313,7 +326,8 @@ pub struct SensorSnapshot {
     pub net: NetSnapshot,
     /// 电池域（无电池/未启用 = None）
     pub battery: Option<BatteryData>,
-    /// LHM Storage 温度列表（按 LHM 硬件名展示；DiskData.temperature 为卷侧尽力匹配）
+    /// 磁盘温度列表（v3 原生：NVMe 健康日志，按物理盘展示；DiskData.temperature 为
+    /// 卷盘符 → 物理盘关联匹配）
     pub storage_temps: Vec<StorageTemp>,
     /// 诊断串（各数据源降级原因汇总）
     pub diag: String,

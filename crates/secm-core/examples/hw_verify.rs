@@ -1,36 +1,28 @@
-//! hw_verify — 硬件指标真机验证工具（ADR-0010 指标门禁）
+//! hw_verify — 硬件指标真机验证工具（v3.0.0 原生迁移版）
 //!
-//! 用途：采集 3 帧统一快照后打印各指标 值/来源/错误，用于验证：
-//! 1. 管理员 / 普通用户（降权 token）下的指标可用性差异（ADR-0007 权限矩阵）；
-//! 2. LHM sidecar 不可用时的降级语义（无伪造 0/默认值）。
+//! 用途：采集 5 帧统一快照后打印各指标 值/来源/错误，用于验证：
+//! 1. 纯原生采集链路（NVML/DXGI/PDH/Win32/IOCTL/WMI）在真实机器上的可用性；
+//! 2. 非管理员环境下的权限降级语义（CPU 温度/主板域如实 unavailable，无伪造）；
+//! 3. 数据持续刷新（多帧对比负载/速率变化）。
 //!
-//! 环境变量：
-//! - `SECM_DISABLE_LHM=1`  跳过 sidecar 启动（模拟"无 sidecar/驱动不可访问"场景）
-//! - `SECM_HW_VERIFY_NO_LHM_PROMPT=1` 语义同上（别名，脚本友好）
-//!
-//! 运行：`cargo run -p secm-core --example hw_verify`（重复 3 帧，间隔 1.2s）
+//! 运行：`cargo run -p secm-core --example hw_verify`
+//! （无需管理员权限；无任何 HTTP/localhost 依赖；无 sidecar 启动）
 
 use secm_core::sensor_service::SensorService;
 
 fn main() {
-    // 与 sensor_service::ensure_lhm_periodic 的开关保持一致（别名归一）
-    if std::env::var("SECM_HW_VERIFY_NO_LHM_PROMPT").as_deref() == Ok("1") {
-        std::env::set_var("SECM_DISABLE_LHM", "1");
-    }
-
+    println!("=== SECM 硬件原生采集验证（v3.0.0，零 HTTP/零提权）===");
     SensorService::start_once();
-    // 等 15 帧（~18s）：首轮 collect 含 PDH warmup ~2s，sidecar 冷启动 LHM Open
-    // 枚举全部硬件需 >6s，失败退避 5s 窗口过后续帧即可见 LHM 域真实值
-    for frame in 1..=15 {
+    // 等 6 帧（~7s）：首轮 collect 含 PDH warmup ~2s、磁盘温度首拍 IOCTL、
+    // WMI SPD 一次性查询；此后帧反映持续刷新语义
+    for frame in 1..=6 {
         std::thread::sleep(std::time::Duration::from_millis(1200));
-        if frame == 15 {
+        if frame == 6 {
             let snap = SensorService::snapshot();
             print_snapshot(&snap);
         }
     }
-    // 退出清理（对齐主程序 on_app_quit → lhm::shutdown：受控退出 + 孤儿清理，
-    // 防止 sidecar 继承的 stdout 句柄阻塞父进程管道收尾）
-    secm_core::lhm::shutdown();
+    println!("=== 验证结束（纯进程内 Rust 直调，无 sidecar 清理需求）===");
 }
 
 fn print_snapshot(snap: &secm_core::sensor::SensorSnapshot) {
@@ -50,17 +42,9 @@ fn print_snapshot(snap: &secm_core::sensor::SensorSnapshot) {
         m(&snap.cpu.voltage, "V"),
     );
     if let Some(mb) = &snap.motherboard {
-        println!(
-            "MOBO: name={:?} sysTemp={} cpuFan={} pump={} caseFan={} rawSensors={}",
-            mb.name,
-            m(&mb.system_temp, "°C"),
-            m(&mb.cpu_fan_rpm, "RPM"),
-            m(&mb.cpu_pump_rpm, "RPM"),
-            m(&mb.case_fan_rpm, "RPM"),
-            mb.sensors.len(),
-        );
+        println!("MOBO: name={:?} sensors={}", mb.name, mb.sensors.len());
     } else {
-        println!("MOBO: n/a(LHM 不可用)");
+        println!("MOBO: n/a（SuperIO 需 ring0 内核驱动，非管理员环境不可用）");
     }
     for g in &snap.gpu {
         println!(
@@ -82,7 +66,7 @@ fn print_snapshot(snap: &secm_core::sensor::SensorSnapshot) {
         );
     }
     if snap.gpu.is_empty() {
-        println!("GPU: n/a(LHM 不可用或无显卡)");
+        println!("GPU: n/a（NVML/DXGI 未枚举到适配器）");
     }
     let mem = &snap.memory;
     println!(
@@ -122,14 +106,15 @@ fn print_snapshot(snap: &secm_core::sensor::SensorSnapshot) {
     }
     match &snap.battery {
         Some(b) => println!(
-            "BAT: pct={} power={} current={} volt={} ac={}",
+            "BAT: pct={} power={} current={} volt={} ac={} charging={}",
             m(&b.percent, "%"),
             m(&b.power_w, "W"),
             m(&b.current_a, "A"),
             m(&b.voltage_v, "V"),
             b.ac_online,
+            b.charging,
         ),
-        None => println!("BAT: n/a(无电池或 LHM 不可用)"),
+        None => println!("BAT: n/a（无电池——台式机，或用户态电池 API 不可得）"),
     }
     for st in &snap.storage_temps {
         println!("STORAGE[{}]: {}", st.name, m(&st.temp, "°C"),);
