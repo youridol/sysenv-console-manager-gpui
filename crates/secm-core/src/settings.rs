@@ -1,8 +1,19 @@
 // secm-core::settings — Windows 系统设置（注册表开关 + 电源计划）
-// 对齐源 v1.19.0 settings.rs 语义：HAGS/游戏模式/窗口化优化/VRR/鼠标精度 +
-// 异类线程调度策略/卓越性能 + 电源计划 + 服务管理。
+// 对齐上游 settings.rs 语义：HAGS/游戏模式/窗口化优化/VRR/鼠标精度 +
+// 高精度计时器（hpt）+ NVIDIA 电源模式（nvidia_drs）+
+// 异类线程调度策略/卓越性能 + 电源计划（含 overlay 过滤/中文名映射/删除）+ 服务管理。
 
 use serde::Serialize;
+
+// ============================================================================
+// 模块 re-export（设置页全量能力面：hpt / nvidia_drs / 服务契约）
+// ============================================================================
+
+pub use crate::hpt::{get_hpt_state, set_hpt_state};
+pub use crate::nvidia_drs::{
+    get_power_mode as get_nvidia_power_mode, set_power_mode as set_nvidia_power_mode,
+    NvidiaPowerMode,
+};
 
 // ============================================================================
 // 数据类型（对齐源）
@@ -167,7 +178,8 @@ pub fn get_hags_state() -> SettingState {
             name: "GPU 硬件加速调度 (HAGS)".to_string(),
             enabled: false,
             admin_required: true,
-            message: format!("读取失败: {}", e),
+            // 对齐上游：读取失败时错误消息并入 GPU 检测信息（帮助定位无显卡/驱动异常环境）
+            message: format!("读取失败: {} | {}", e, detect_gpu_message()),
         },
     }
 }
@@ -506,7 +518,43 @@ pub fn set_mouse_precision(enabled: bool) -> Result<SettingState, String> {
 
 use secm_datasource::power;
 
-/// 枚举电源计划（注册表 PowerSchemes 子键 + 活动 GUID 标注）
+/// Win11 overlay GUID —— 非真实电源计划（节能模式覆盖层等），枚举时必须剔除（对齐上游）
+const OVERLAY_GUIDS: &[&str] = &[
+    "961cc777-2547-4f9d-8174-7d86181b8a7a",
+    "ded574b5-45a0-4f42-8737-46345c09c238",
+];
+
+/// 已知电源计划 GUID → 中文名映射 + FriendlyName 间接串解析（对齐上游 power_plan_name）
+///
+/// FriendlyName 可能为 `@C:\Windows\...dll,-15,Balanced` 形式的间接字符串，取最后一个逗号后的
+/// 可读名；英文名回退中文；空名回退 GUID 前 8 位。
+fn power_plan_name(guid: &str, raw_name: &str) -> String {
+    match guid.to_lowercase().as_str() {
+        "381b4222-f694-41f0-9685-ff5bb260df2e" => "平衡".to_string(),
+        "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c" => "高性能".to_string(),
+        "a1841308-3541-4fab-bc81-f71556f20b4a" => "节能".to_string(),
+        "e9a42b02-d5df-448d-aa00-03f14749eb61" => "卓越性能".to_string(),
+        _ => {
+            // 解析 FriendlyName —— 可能为 "@C:\\Windows\\...dll,-15,Balanced" 间接串
+            let name = if let Some(idx) = raw_name.rfind(',') {
+                raw_name[idx + 1..].trim().to_string()
+            } else {
+                raw_name.to_string()
+            };
+            // 英文 → 中文回退
+            match name.to_lowercase().as_str() {
+                "balanced" => "平衡".into(),
+                "high performance" => "高性能".into(),
+                "power saver" => "节能".into(),
+                "ultimate performance" => "卓越性能".into(),
+                _ if name.is_empty() => guid[..8].to_string(),
+                _ => name,
+            }
+        }
+    }
+}
+
+/// 枚举电源计划（注册表 PowerSchemes 子键 + 活动 GUID 标注；剔除 overlay 非真实计划）
 pub fn get_power_plans() -> Result<Vec<PowerPlan>, String> {
     use winreg::enums::*;
     use winreg::RegKey;
@@ -525,11 +573,21 @@ pub fn get_power_plans() -> Result<Vec<PowerPlan>, String> {
 
     let mut plans = Vec::new();
     for name in schemes_key.enum_keys().flatten() {
-        // 名称来自子键 FriendlyName (可本地化) → 优先读英文名称
+        // Win11 overlay GUID 剔除（非真实电源计划，UI 不应展示/激活/删除）
+        if OVERLAY_GUIDS.contains(&name.to_lowercase().as_str()) {
+            continue;
+        }
+        // 名称：已知 GUID 中文映射 → FriendlyName 间接串解析 → GUID 前 8 位
         let friendly = read_power_scheme_name(&name);
+        let display = power_plan_name(&name, &friendly);
+        // FriendlyName 含 "Overlay" 的条目同样不是真实电源计划（对齐上游双重过滤）
+        if display.to_lowercase().contains("overlay") {
+            continue;
+        }
         plans.push(PowerPlan {
-            guid: name.clone(),
-            name: friendly,
+            // GUID 统一小写（与激活比对/删除/导入查重一致）
+            guid: name.to_lowercase(),
+            name: display,
             is_active: name.to_lowercase() == active,
         });
     }
@@ -576,9 +634,14 @@ const HETERO_THREAD_POLICY_GUID: &str = "93b8b6dc-0698-4d1c-9ee4-0644e900c85d";
 const HETERO_SHORT_THREAD_POLICY_GUID: &str = "465e1f50-b610-473a-ab58-00d1077dc418";
 
 /// 异类调度策略 AC/DC 当前值（None = 使用系统默认，未显式设置）
+///
+/// `*_present`：当前电源计划下是否存在该策略设置项（`PowerSchemes\<方案>\{处理器子组}\{策略GUID}` 键）。
+/// 缺失时 UI 提示"首次配置将自动注入"，`set_hetero_policy_scoped` 写入前自动注入，保证配置成功。
 #[derive(Debug, Clone, Serialize)]
 pub struct HeteroPolicies {
     pub supported: bool,
+    pub thread_present: bool,
+    pub short_present: bool,
     pub thread_ac: Option<u32>,
     pub thread_dc: Option<u32>,
     pub short_ac: Option<u32>,
@@ -663,8 +726,14 @@ pub fn get_hetero_policies() -> Result<HeteroPolicies, String> {
 
     let supported = thread_ac.is_some() || thread_dc.is_some();
 
+    // 方案级设置项存在性检测（缺失时写入前自动注入，见 ensure_hetero_setting_key）
+    let thread_present = hetero_setting_key_exists(&active_guid, HETERO_THREAD_POLICY_GUID);
+    let short_present = hetero_setting_key_exists(&active_guid, HETERO_SHORT_THREAD_POLICY_GUID);
+
     Ok(HeteroPolicies {
         supported,
+        thread_present,
+        short_present,
         thread_ac,
         thread_dc,
         short_ac,
@@ -672,13 +741,53 @@ pub fn get_hetero_policies() -> Result<HeteroPolicies, String> {
     })
 }
 
-/// 设置异类调度策略（AC/DC 同步写入 + 重新激活当前方案使更改生效）
+/// 检测当前（或指定）电源方案下是否已存在异类策略设置项键
+///
+/// 存在性判定 = `PowerSchemes\<方案>\{处理器子组}\{策略GUID}` 键存在（值可由
+/// ACSettingIndex/DCSettingIndex 承载；键存在但值缺失时读取回退系统默认）。
+///
+/// 缺失时的注入机制（真机验证）：`PowerWrite*ValueIndex` 对不存在的设置项键
+/// 自动创建并落值（电源服务链路），因此"注入"内建于写入路径，无需注册表直写
+/// ——PowerSchemes 子键受电源服务 ACL 保护，直写注册表即使管理员也被拒绝。
+fn hetero_setting_key_exists(active_scheme: &str, setting: &str) -> bool {
+    use winreg::enums::*;
+    use winreg::RegKey;
+    if active_scheme.is_empty() {
+        return false;
+    }
+    let path = format!(
+        r"SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes\{}\{}\{}",
+        active_scheme, SUBGROUP_PROCESSOR, setting
+    );
+    RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey_with_flags(&path, KEY_READ | KEY_WOW64_64KEY)
+        .is_ok()
+}
+
+/// 设置异类调度策略（AC/DC 双写便捷封装：两路同时写入 + 重新激活当前方案生效）
+///
+/// `kind`: "thread" = 异类线程调度策略, "short" = 异类短运行线程调度策略
+pub fn set_hetero_policy(kind: &str, value: u32) -> Result<(), String> {
+    set_hetero_policy_scoped(kind, value, true, true)
+}
+
+/// 设置异类调度策略（作用域版：按需写 AC / DC 任意组合 + 重新激活当前方案使更改生效）
 ///
 /// 纯 Rust 驱动（secm-datasource::power：PowerWriteACValueIndex /
 /// PowerWriteDCValueIndex / PowerSetActiveScheme，与 powercfg /setacvalueindex 等等价）。
 ///
+/// 缺失自动注入（真机机制验证）：方案下不存在策略设置项键时，PowerWrite*ValueIndex
+/// 会自动创建该键并落值（与 powercfg /setacvalueindex 同链路，电源服务落盘）——
+/// 无需（也不可）直写注册表：PowerSchemes 子键受电源服务 ACL 保护，管理员直写亦被拒绝。
+///
 /// `kind`: "thread" = 异类线程调度策略, "short" = 异类短运行线程调度策略
-pub fn set_hetero_policy(kind: &str, value: u32) -> Result<(), String> {
+/// `apply_ac` / `apply_dc`: 是否写入交流/电池两路值（UI 允许分别调整六档策略）
+pub fn set_hetero_policy_scoped(
+    kind: &str,
+    value: u32,
+    apply_ac: bool,
+    apply_dc: bool,
+) -> Result<(), String> {
     let setting = match kind {
         "short" => HETERO_SHORT_THREAD_POLICY_GUID,
         _ => HETERO_THREAD_POLICY_GUID,
@@ -689,15 +798,21 @@ pub fn set_hetero_policy(kind: &str, value: u32) -> Result<(), String> {
     let ac_backup = power::read_ac_value(None, SUBGROUP_PROCESSOR, setting).ok();
 
     // 写 AC/DC 值索引（None = 当前激活方案，对应 SCHEME_CURRENT 语义）
-    if let Err(e) = power::write_ac_value(None, SUBGROUP_PROCESSOR, setting, value) {
-        return Err(format!("写入异类策略 AC 值失败: {}", e));
-    }
-    if let Err(e) = power::write_dc_value(None, SUBGROUP_PROCESSOR, setting, value) {
-        // DC 写失败：回滚 AC 至原值（有原值才回滚），保证 AC/DC 状态一致
-        if let Some(orig) = ac_backup {
-            let _ = power::write_ac_value(None, SUBGROUP_PROCESSOR, setting, orig);
+    if apply_ac {
+        if let Err(e) = power::write_ac_value(None, SUBGROUP_PROCESSOR, setting, value) {
+            return Err(format!("写入异类策略 AC 值失败: {}", e));
         }
-        return Err(format!("写入异类策略 DC 值失败（已回滚 AC）: {}", e));
+    }
+    if apply_dc {
+        if let Err(e) = power::write_dc_value(None, SUBGROUP_PROCESSOR, setting, value) {
+            // DC 写失败：回滚 AC 至原值（有原值才回滚），保证 AC/DC 状态一致
+            if apply_ac {
+                if let Some(orig) = ac_backup {
+                    let _ = power::write_ac_value(None, SUBGROUP_PROCESSOR, setting, orig);
+                }
+            }
+            return Err(format!("写入异类策略 DC 值失败（已回滚 AC）: {}", e));
+        }
     }
 
     // 重新激活当前方案（对应 powercfg /s SCHEME_CURRENT，使更改立即生效）
@@ -742,9 +857,38 @@ pub fn enable_ultimate_performance() -> Result<String, String> {
 
 pub use secm_datasource::service::ServiceInfo;
 
-/// 枚举全部服务
+/// 枚举全部服务（含启动类型并行补全，对齐上游 list_all_services 语义）
+///
+/// datasource::enum_services 一次返回名称/显示名/状态（启动类型占位"未知"），
+/// 启动类型由本函数 8 线程并行补全（内存内 QueryServiceConfigW 调用，
+/// 比 spawn `sc qc` 快 2-3 个数量级）。单个服务查询失败降级"未知"，不阻塞整体。
 pub fn list_all_services() -> Result<Vec<ServiceInfo>, String> {
-    secm_datasource::service::enum_services().map_err(|e| format!("枚举服务失败: {}", e))
+    let mut entries =
+        secm_datasource::service::enum_services().map_err(|e| format!("枚举服务失败: {}", e))?;
+
+    // 8 线程分片并行补全启动类型（QueryServiceConfigW 为阻塞 API，并行摊薄总时延）
+    const START_TYPE_THREADS: usize = 8;
+    let n = entries.len();
+    if n > 0 {
+        let threads = START_TYPE_THREADS.min(n);
+        let chunk = n.div_ceil(threads);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = entries
+                .chunks_mut(chunk)
+                .map(|slice| {
+                    scope.spawn(move || {
+                        for svc in slice.iter_mut() {
+                            svc.start_type = secm_datasource::service::start_type_of(&svc.name);
+                        }
+                    })
+                })
+                .collect();
+            for h in handles {
+                let _ = h.join();
+            }
+        });
+    }
+    Ok(entries)
 }
 
 /// 启动服务（需管理员；幂等）

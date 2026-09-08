@@ -16,10 +16,11 @@ use secm_core::cleanup::{self, CleanupResult, ProcessInfo};
 use crate::pi_clone::theme::{Appearance, Palette};
 use crate::ui::page::{
     badge, banner, button, button_sm, card, card_divider, card_header_accent, page_header,
-    page_root, section_title, table_empty, table_head, table_row, BannerKind, ButtonKind, ColWidth,
-    CARD_PADDING,
+    page_root, section_title, table_empty, table_head, table_mid_cell, table_row, BannerKind,
+    ButtonKind, ColWidth, CARD_PADDING,
 };
 use crate::ui::text_input::{ChangeText, TextField};
+use crate::ui::toast;
 
 /// 清理操作类型（按钮 → 后台执行函数映射）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,11 +38,11 @@ impl CleanOp {
     fn label(self) -> &'static str {
         match self {
             Self::Temp => "清理临时文件",
-            Self::Nvidia => "NVIDIA 着色器缓存",
-            Self::Amd => "AMD 着色器缓存",
-            Self::DirectX => "DirectX 缓存",
-            Self::Steam => "Steam 着色器缓存",
-            Self::AllShaders => "一键清理全部着色器缓存",
+            Self::Nvidia => "清 NVIDIA 缓存",
+            Self::Amd => "清 AMD 缓存",
+            Self::DirectX => "清 DirectX",
+            Self::Steam => "清 Steam 缓存",
+            Self::AllShaders => "全清着色器",
             Self::TrimWorkingSet => "修剪工作集",
         }
     }
@@ -158,13 +159,29 @@ impl CleanupView {
 
     /// 记录执行结果（追溯唯一出口：全部逐行流式写入右侧日志流面板；
     /// 摘要行含操作/结论/释放量，明细行失败/重启删除以 Warn 呈现）
-    fn record_result(&mut self, result: CleanupResult, _cx: &mut Context<Self>) {
+    fn record_result(&mut self, result: CleanupResult, cx: &mut Context<Self>) {
         let time = secm_core::logger::now_hms();
         let verdict = if result.success {
             "成功"
         } else {
             "部分完成"
         };
+        // 全局泡泡提示：完成摘要随屏可见（日志流仅作追溯）
+        let toast_msg = format!(
+            "{}{} · 释放 {}",
+            result.operation,
+            if result.success {
+                "完成"
+            } else {
+                "部分完成"
+            },
+            Self::fmt_bytes(result.bytes_freed)
+        );
+        if result.success {
+            toast::success(toast_msg, cx);
+        } else {
+            toast::warning(toast_msg, cx);
+        }
         // 完成摘要（日志流可检索的锚点行）
         log::info!(
             "清理优化 · {} · {} · 释放 {}",
@@ -283,14 +300,11 @@ impl CleanupView {
 }
 
 impl Render for CleanupView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = self.pal();
         let filtered = self.filtered();
         let status = self.status.clone();
         let cleaning = self.cleaning;
-        // 响应式：主内容区过窄时左右两栏改为上下堆叠（自适应）
-        let vw = f32::from(window.viewport_size().width);
-        let side_by_side = vw >= 900.0;
 
         // 统一根容器：内边距/纵向节奏/超高滚动/页面底色（随主题联动）
         page_root(&pal, "cleanup-page-root", &self.page_scroll, &cx.entity())
@@ -305,31 +319,11 @@ impl Render for CleanupView {
                 let msg = status.clone();
                 s.child(banner(&pal, BannerKind::Info, msg))
             })
-            // 主体行：窗口宽时左右两栏（左=缓存清理；右=进程管理）；
-            // 窄窗（<900）时上下堆叠（响应式自适应）
-            .child(
-                div()
-                    .flex()
-                    .when(!side_by_side, |s| s.flex_col())
-                    .items_start()
-                    .gap_4()
-                    // 左列（缓存清理，含 DNS 刷新）
-                    .child(
-                        div()
-                            .flex_col()
-                            .when(side_by_side, |s| s.flex_1().min_w(px(0.0)))
-                            .gap_4()
-                            .child(self.clean_card(&pal, cleaning, cx)),
-                    )
-                    // 右列（进程管理：刷新 + 搜索并入卡容器）
-                    .child(
-                        div()
-                            .flex_col()
-                            .when(side_by_side, |s| s.flex_1().min_w(px(0.0)))
-                            .gap_4()
-                            .child(self.proc_card(&pal, &filtered, cx)),
-                    ),
-            )
+            // 上下两行全宽排版（用户指令：缓存清理在上、进程管理在下，不并排）；
+            // 两卡各自全宽，纵向节奏由卡片自带 .mb(PAGE_GAP) 承担
+            .child(self.clean_card(&pal, cleaning, cx))
+            // 进程管理（刷新 + 搜索并入卡容器，表格全宽自适应进程名）
+            .child(self.proc_card(&pal, &filtered, cx))
     }
 }
 
@@ -373,7 +367,7 @@ impl CleanupView {
                     .flex_wrap()
                     .gap_2()
                     .child(self.clean_button(pal, CleanOp::Temp, cleaning, cx))
-                    .child(self.op_button(pal, "刷新 DNS 缓存", QuickOp::FlushDns, cx)),
+                    .child(self.op_button(pal, "刷新 DNS", QuickOp::FlushDns, cx)),
             )
             // 分组：显卡着色器缓存
             .child(
@@ -490,7 +484,7 @@ impl CleanupView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(self.op_button(pal, "刷新进程列表", QuickOp::RefreshProcs, cx))
+                    .child(self.op_button(pal, "刷新进程", QuickOp::RefreshProcs, cx))
                     .child(
                         div()
                             .flex_1()
@@ -498,13 +492,14 @@ impl CleanupView {
                             .child(self.search_input.clone()),
                     ),
             )
-            // 表头固定于滚动区外（Top 200 滚动时表头不随行滚走）
+            // 表头固定于滚动区外（Top 200 滚动时表头不随行滚走）；
+            // PID/进程名/内存三列居中（Mid/FlexMid=水平居中），与数据行同规格居中对齐
             .child(table_head(
                 pal,
                 &[
-                    ("PID", ColWidth::Px(70.0)),
-                    ("进程名", ColWidth::Flex),
-                    ("内存", ColWidth::Px(90.0)),
+                    ("PID", ColWidth::Mid(70.0)),
+                    ("进程名", ColWidth::FlexMid),
+                    ("内存", ColWidth::Mid(90.0)),
                     ("优先级", ColWidth::Px(252.0)),
                 ],
             ))
@@ -549,8 +544,8 @@ impl CleanupView {
             })
     }
 
-    /// 进程行（列宽与表头规格一致：PID 70 / 名称自适应 / 内存 90 / 优先级 6 档 252；
-    /// 固定行高 44 保证 uniform_list 等高语义）
+    /// 进程行（列宽与表头规格一致：PID 70(居中) / 名称自适应(居中) / 内存 90(居中) /
+    /// 优先级 6 档 252；固定行高 44 保证 uniform_list 等高语义）
     fn proc_row(&self, pal: &Palette, p: &ProcessInfo, weak: WeakEntity<Self>) -> impl IntoElement {
         let pid = p.pid;
         let name = p.name.clone();
@@ -582,30 +577,29 @@ impl CleanupView {
         table_row(pal)
             .h(px(44.0))
             .id(SharedString::from(format!("proc-{}", pid)))
-            // PID 列
+            // PID 列（居中，与表头同一规格）
             .child(
-                div()
-                    .flex_none()
-                    .w(px(70.0))
+                table_mid_cell(70.0)
                     .text_size(px(12.0))
                     .text_color(pal.text_muted)
                     .child(pid.to_string()),
             )
-            // 进程名列
+            // 进程名列（自适应剩余全宽；居中 + 单行省略防异常换行/溢出 —— 行高固定 44
+            // 由 uniform_list 等高语义决定，名称过长时优雅省略不折行）
             .child(
                 div()
                     .flex_1()
                     .min_w(px(0.0))
-                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .truncate()
+                    .text_center()
                     .text_size(px(12.5))
                     .text_color(pal.text)
                     .child(name),
             )
-            // 内存列
+            // 内存列（居中，与表头同一规格）
             .child(
-                div()
-                    .flex_none()
-                    .w(px(90.0))
+                table_mid_cell(90.0)
                     .text_size(px(12.0))
                     .text_color(pal.text_muted)
                     .child(mem_disp),

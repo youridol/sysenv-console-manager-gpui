@@ -2,7 +2,8 @@
 //
 // 全部左侧边栏页面的主内容区统一由本模块装配：
 //   page_root（根容器）→ page_header（页头）→ card/card_header（卡片）→
-//   table_head/table_row（数据表）→ banner（状态反馈）→ button（按钮）
+//   card_grid_row/grid_cell（两列响应式卡片网格）→ table_head/table_row（数据表）→
+//   banner（状态反馈）→ button（按钮）
 // 颜色一律取自 pi_clone::theme::Palette（明暗双主题，随壳联动），禁止硬编码业务色。
 //
 // 所有构件返回 gpui::Div，调用方可继续 .id() / .child() / .on_click() 链式装配。
@@ -32,6 +33,12 @@ pub const PAGE_GAP: f32 = 24.0;
 pub const CARD_RADIUS: f32 = 12.0;
 /// 卡片水平内边距
 pub const CARD_PADDING: f32 = 20.0;
+/// 两列卡片行内横向间距（横向主轴 gap 在 taffy 0.9.0 正常生效）
+pub const CARD_GRID_GAP: f32 = 16.0;
+/// 网格格子基准宽（= 最小宽）：容器 ≥ 2×基准+间距 → 两列并排；
+/// 不足则 flex_wrap 自动换行 → 单列全宽。基准取值保证双卡并排时各自 ≥460px，
+/// 覆盖进程管理表（PID/名称/内存/优先级列）在两列态下的最小可读宽度。
+pub const GRID_CELL_BASIS: f32 = 460.0;
 
 /// 软色调：同色低透明度（badge/banner/危险强调的底色与描边）
 pub fn soft(color: Rgba, alpha: f32) -> Rgba {
@@ -81,13 +88,14 @@ pub fn page_root<T: 'static>(
         .on_scroll_wheel({
             let entity = entity.clone();
             move |_ev: &gpui::ScrollWheelEvent, _window, cx| {
-                let _ = entity.update(cx, |_, cx| cx.notify());
+                entity.update(cx, |_, cx| cx.notify());
             }
         })
 }
 
 /// 页头：左侧标题（22px 粗体）+ 副标题（12.5px 弱化）纵向堆叠；
 /// 右侧动作区（刷新/运行按钮、状态徽标）由调用方以 `.child(...)` 追加（容器 justify_between）。
+/// 标题块 flex_1 + 截断：窄主区（右栏展开等场景）副标题自动省略，动作区不被挤出。
 /// 自带 `.mb(PAGE_GAP)`：与后续卡片的纵向留白（容器纵向 gap 不可用，见 PAGE_GAP 文档）。
 pub fn page_header(
     pal: &Palette,
@@ -103,18 +111,22 @@ pub fn page_header(
         .child(
             div()
                 .flex_col()
+                .flex_1()
+                .min_w(px(0.0))
                 .gap_1()
                 .child(
                     div()
                         .text_size(px(22.0))
                         .font_weight(FontWeight::BOLD)
                         .text_color(pal.text)
+                        .truncate()
                         .child(title.into()),
                 )
                 .child(
                     div()
                         .text_size(px(12.5))
                         .text_color(pal.text_muted)
+                        .truncate()
                         .child(subtitle.into()),
                 ),
         )
@@ -178,6 +190,35 @@ pub fn card_body(_pal: &Palette) -> Div {
         .px(px(CARD_PADDING))
         .py(px(12.0))
         .gap(px(8.0))
+}
+
+// ---------------------------------------------------------------------------
+// 两列响应式卡片网格
+// ---------------------------------------------------------------------------
+
+/// 两列卡片行（容器级自适应，无需窗口断点）：
+/// 子格基准宽 420px + flex_wrap —— 容器足够宽时两格并排（grow 均分剩余宽度），
+/// 过窄（含右栏日志面板挤压主区的场景）自动换行为单列全宽。
+/// 纵向节奏由卡片自带 `.mb(PAGE_GAP)` 承担（跨轴 gap 在 taffy 0.9.0 不可靠）。
+/// 用法：`page_root(...).child(card_grid_row().child(grid_cell().child(卡A)).child(grid_cell().child(卡B)))`
+pub fn card_grid_row() -> Div {
+    div()
+        .flex()
+        .flex_wrap()
+        .gap(px(CARD_GRID_GAP))
+        .w_full()
+        .min_w(px(0.0))
+}
+
+/// 网格格子（包裹单张卡）：基准/最小宽 460px + flex_grow 均分 ——
+/// 两列时各占一半，换行时占满整行；`min_w(460)` 保证窄容器触发换行而非挤压。
+pub fn grid_cell() -> Div {
+    div()
+        .flex_col()
+        .min_w(px(GRID_CELL_BASIS))
+        .flex_basis(px(GRID_CELL_BASIS))
+        .flex_grow()
+        .flex_shrink()
 }
 
 // ---------------------------------------------------------------------------
@@ -307,6 +348,10 @@ fn button_base(pal: &Palette, kind: ButtonKind, h: f32, pad_x: f32, font: f32) -
         .text_size(px(font))
         .font_weight(FontWeight::MEDIUM)
         .text_color(fg)
+        // 防挤压/防换行：按钮永不收缩、文本单行 —— 避免长文案撑破行布局或
+        // 异常换行（超长文案由调用方负责简化，按钮宽度交由 flex 父级约束）
+        .whitespace_nowrap()
+        .flex_shrink_0()
 }
 
 // ---------------------------------------------------------------------------
@@ -317,22 +362,37 @@ fn button_base(pal: &Palette, kind: ButtonKind, h: f32, pad_x: f32, font: f32) -
 #[derive(Debug, Clone, Copy)]
 pub enum ColWidth {
     Flex,
+    /// 弹性宽 + 水平居中（表头与数据单元格同规格）
+    FlexMid,
     Px(f32),
+    /// 定宽 + 水平居中（表头与数据单元格同规格）
+    Mid(f32),
 }
 
 fn col_cell(width: ColWidth) -> Div {
     match width {
         ColWidth::Flex => div().flex_1().min_w(px(0.0)),
+        ColWidth::FlexMid => div().flex_1().min_w(px(0.0)).text_center(),
         ColWidth::Px(w) => div().flex_none().w(px(w)),
+        ColWidth::Mid(w) => div().flex_none().w(px(w)).text_center(),
     }
 }
 
-/// 数据表表头（列宽规格化；bg_subtle 底 + 底描边；列名为 'static 字面量）
+/// 数据行居中单元格（与 ColWidth::Mid 表头规格配套使用，
+/// 同一列同一宽度 → 表头与各行内容水平居中对齐）
+pub fn table_mid_cell(width: f32) -> Div {
+    div().flex_none().w(px(width)).text_center()
+}
+
+/// 数据表表头（列宽规格化；bg_subtle 底 + 底描边；列名为 'static 字面量）。
+/// `.w_full()`：表头必须占满容器宽 —— 在 card（flex_col cross-axis stretch）内本可
+/// 自然全宽，但被装入非 stretch 容器时同样成立（与 table_row 规格一致，防列错位）。
 pub fn table_head(pal: &Palette, cols: &[(&'static str, ColWidth)]) -> Div {
     div()
         .flex()
         .items_center()
         .gap_2()
+        .w_full()
         .px(px(CARD_PADDING))
         .py(px(10.0))
         .bg(pal.bg_subtle)
@@ -347,12 +407,16 @@ pub fn table_head(pal: &Palette, cols: &[(&'static str, ColWidth)]) -> Div {
         }))
 }
 
-/// 数据表行骨架（px20/py9 + 底描边；调用方按相同 ColWidth 装配单元格，可再接 hover/id/on_click）
+/// 数据表行骨架（px20/py9 + 底描边；调用方按相同 ColWidth 装配单元格，可再接 hover/id/on_click）。
+/// ⚠ `.w_full()` 为强制项：行被 `uniform_list` 以 `layout_as_root` 装载时**没有父容器
+/// stretch**，taffy 对 width:auto 的布局根按内容收缩（shrink-to-fit）——缺 w_full 会导致
+/// 行只有内容宽、全部列拥挤在左侧且与全宽表头错位（v3.3.2 实测截图证据）。
 pub fn table_row(pal: &Palette) -> Div {
     div()
         .flex()
         .items_center()
         .gap_2()
+        .w_full()
         .px(px(CARD_PADDING))
         .py(px(9.0))
         .border_b_1()
@@ -610,5 +674,87 @@ pub fn sparkline_empty(pal: &Palette, text: impl Into<SharedString>) -> Div {
                 .text_size(px(11.0))
                 .text_color(pal.text_dim)
                 .child(text.into()),
+        )
+}
+
+// ---------------------------------------------------------------------------
+// 模态确认弹层（危险操作二次确认）
+// ---------------------------------------------------------------------------
+
+/// 模态确认弹层：半透明遮罩（occlude 拦截下层点击）+ 居中卡片（标题/描述/取消+确认钮）。
+///
+/// 用于删除电源计划、停止服务等破坏性操作的二次确认（对齐上游 AlertDialog 语义）。
+/// 调用方须把返回元素以 `gpui::deferred(...)` 包裹，挂到页面滚动容器**之外**的相对容器：
+/// 延迟绘制置顶 + absolute 覆盖页面可视区（不随内容滚动）。回调经 `cx.listener` 构造。
+/// 无遮罩点击自动关闭 —— 必须显式点「取消」或确认钮（危险操作不做误触关闭）。
+#[allow(clippy::too_many_arguments)]
+pub fn confirm_modal(
+    pal: &Palette,
+    backdrop_id: impl Into<ElementId>,
+    title: impl Into<SharedString>,
+    message: impl Into<SharedString>,
+    confirm_label: impl Into<SharedString>,
+    confirm_kind: ButtonKind,
+    on_confirm: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+    on_cancel: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    let title = title.into();
+    let message = message.into();
+    let confirm_label = confirm_label.into();
+    div()
+        .id(backdrop_id)
+        .absolute()
+        .top_0()
+        .left_0()
+        .w_full()
+        .h_full()
+        // 遮罩拦截点击：下层内容在确认完成前不可交互（模态语义）
+        .occlude()
+        .bg(gpui::black().opacity(0.45))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .flex_col()
+                .gap_3()
+                .w(px(400.0))
+                .p(px(CARD_PADDING))
+                .rounded(px(CARD_RADIUS))
+                .border_1()
+                .border_color(pal.border)
+                .bg(pal.surface_elevated)
+                .child(
+                    div()
+                        .text_size(px(15.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(pal.text)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.5))
+                        .text_color(pal.text_muted)
+                        .child(message),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .pt_1()
+                        .child(
+                            button_sm(pal, ButtonKind::Secondary)
+                                .id("confirm-cancel")
+                                .child("取消")
+                                .on_click(on_cancel),
+                        )
+                        .child(
+                            button_sm(pal, confirm_kind)
+                                .id("confirm-ok")
+                                .child(confirm_label)
+                                .on_click(on_confirm),
+                        ),
+                ),
         )
 }

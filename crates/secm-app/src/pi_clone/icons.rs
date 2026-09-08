@@ -90,6 +90,10 @@ pub enum Icon {
     HardDrive,
     Terminal,
     Info,
+    // 全局泡泡提示语义图标（ui::toast）
+    ToastSuccess,
+    ToastWarning,
+    ToastError,
     // 窗口控制（无标题栏自绘）
     WinMin,
     WinMax,
@@ -126,6 +130,9 @@ impl Icon {
             Icon::HardDrive => "pi-icons/hard-drive.svg",
             Icon::Terminal => "pi-icons/terminal.svg",
             Icon::Info => "pi-icons/info.svg",
+            Icon::ToastSuccess => "pi-icons/toast-success.svg",
+            Icon::ToastWarning => "pi-icons/toast-warning.svg",
+            Icon::ToastError => "pi-icons/toast-error.svg",
             Icon::WinMin => "pi-icons/win-min.svg",
             Icon::WinMax => "pi-icons/win-max.svg",
             Icon::WinRestore => "pi-icons/win-restore.svg",

@@ -15,9 +15,10 @@ use secm_core::sysinfo::{self, SystemInfo};
 
 use crate::pi_clone::theme::{Appearance, Palette};
 use crate::ui::page::{
-    banner, button, button_sm, card, card_body, card_divider, card_header, kv_row_w, page_header,
-    page_root, table_empty, BannerKind, ButtonKind,
+    banner, button, button_sm, card, card_body, card_divider, card_grid_row, card_header,
+    grid_cell, kv_row_w, page_header, page_root, table_empty, BannerKind, ButtonKind,
 };
+use crate::ui::toast;
 
 /// 静态检测结果包（后台一次算齐，回 UI 赋值）
 struct StaticEnvData {
@@ -202,6 +203,25 @@ impl EnvironmentView {
                                 outcome.failures.join("；")
                             ));
                         }
+                        // 全局泡泡提示：预设套用结果（有失败项 → 警告）
+                        if outcome.failures.is_empty() {
+                            toast::success(
+                                format!(
+                                    "「{}」预设套用完成（{} 项联动）",
+                                    preset_name, outcome.applied
+                                ),
+                                cx,
+                            );
+                        } else {
+                            toast::warning(
+                                format!(
+                                    "「{}」预设部分失败（{} 项），明细见状态区与日志流",
+                                    preset_name,
+                                    outcome.failures.len()
+                                ),
+                                cx,
+                            );
+                        }
                         // UI 侧日志：预设套用结果（有失败项 → warn）
                         if outcome.failures.is_empty() {
                             log::info!("环境检测 · 套用「{}」预设完成", preset_name);
@@ -329,20 +349,20 @@ impl Render for EnvironmentView {
             let msg = status.clone();
             s.child(banner(&pal, BannerKind::Info, msg))
         })
-        // 系统信息卡
-        .child(self.system_card(&pal, &sys))
-        // 游戏环境预设
-        .child(self.presets_section(&pal, &presets, applying, cx))
-        // DirectX + VC++ 双列（flex 等宽两列；禁 grid —— taffy grid 滚动容器内不渲染）
+        // 两列网格：系统信息 | AI 工具（容器级自适应，窄区自动堆叠）
         .child(
-            div()
-                .flex()
-                .gap_4()
-                .child(div().flex_1().min_w(px(0.0)).child(self.dx_card(&pal, &dx)))
-                .child(div().flex_1().min_w(px(0.0)).child(self.vc_card(&pal, &vc))),
+            card_grid_row()
+                .child(grid_cell().child(self.system_card(&pal, &sys)))
+                .child(grid_cell().child(self.ai_card(&pal, &ai, ai_loading, cx))),
         )
-        // AI 工具卡
-        .child(self.ai_card(&pal, &ai, ai_loading, cx))
+        // 游戏环境预设（全宽卡，行内设置明细多）
+        .child(self.presets_section(&pal, &presets, applying, cx))
+        // DirectX + VC++ 两列（容器级自适应；禁 grid —— taffy grid 滚动容器内不渲染）
+        .child(
+            card_grid_row()
+                .child(grid_cell().child(self.dx_card(&pal, &dx)))
+                .child(grid_cell().child(self.vc_card(&pal, &vc))),
+        )
     }
 }
 

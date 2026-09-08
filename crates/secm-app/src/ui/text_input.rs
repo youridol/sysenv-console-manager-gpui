@@ -1,17 +1,25 @@
 // secm-app::ui::text_input — 单行文本输入控件（移植 GPUI 官方 input example）
 // 基于 ElementInputHandler + keymap actions：支持光标移动/选择/删除/剪贴板/IME。
 // 使用方式：父页面持 Entity<TextField>，订阅 ChangeText 事件取最新值。
+//
+// 视觉规范（v3.3.0 全链路统一）：输入框自带统一外壳 —— 圆角 8 / 1px 描边 /
+// surface_muted 底 / 焦点态 accent 描边 + surface 底 / 禁用态 50% 透明度；
+// 文本色一律取 pi_clone::theme::Palette（暗色主题白字高对比，杜绝继承黑字），
+// placeholder 取 text_dim，光标取 accent，选区取 accent 软色。
 
 use std::ops::Range;
 
 use gpui::{
-    actions, div, fill, point, prelude::*, px, relative, rgb, size, App, Bounds, ClipboardItem,
-    Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
-    FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString, Style,
-    TextRun, UTF16Selection, UnderlineStyle, Window,
+    actions, div, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem, Context,
+    CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle,
+    Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString, Style, TextRun,
+    UTF16Selection, UnderlineStyle, Window,
 };
 use unicode_segmentation::*;
+
+use crate::pi_clone::theme::current_palette;
+use crate::ui::page::soft;
 
 actions!(
     text_input,
@@ -38,7 +46,7 @@ pub struct ChangeText {
     pub text: SharedString,
 }
 
-/// 单行文本输入框（含自身焦点/绘制逻辑）
+/// 单行文本输入框（含自身焦点/绘制逻辑 + 统一视觉外壳）
 pub struct TextField {
     pub focus_handle: FocusHandle,
     content: SharedString,
@@ -51,7 +59,14 @@ pub struct TextField {
     is_selecting: bool,
     /// 实例标识（render 时元素 id 唯一）
     instance_id: SharedString,
+    /// 禁用态：视觉降透明 + 输入/焦点交互全部拒绝
+    disabled: bool,
 }
+
+/// 统一视觉常量（与 button h32 对齐，圆角与卡片体系一致）
+const INPUT_HEIGHT: f32 = 32.0;
+const INPUT_RADIUS: f32 = 8.0;
+const INPUT_FONT: f32 = 13.0;
 
 impl TextField {
     pub fn new(
@@ -70,7 +85,22 @@ impl TextField {
             last_bounds: None,
             is_selecting: false,
             instance_id: SharedString::from(format!("text-field-{:?}", cx.entity_id())),
+            disabled: false,
         }
+    }
+
+    /// 运行期切换禁用态（失焦 + 清选择，防残影）
+    pub fn set_disabled(&mut self, disabled: bool, cx: &mut Context<Self>) {
+        if self.disabled == disabled {
+            return;
+        }
+        self.disabled = disabled;
+        if disabled {
+            self.selected_range = 0..0;
+            self.selection_reversed = false;
+            self.marked_range = None;
+        }
+        cx.notify();
     }
 
     /// 读取当前值
@@ -88,7 +118,15 @@ impl TextField {
         cx.notify();
     }
 
+    /// 禁用态统一门禁：全部交互动作先过此闸（视觉/逻辑双降级）
+    fn gated(&self) -> bool {
+        self.disabled
+    }
+
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
+        if self.gated() {
+            return;
+        }
         if self.selected_range.is_empty() {
             self.move_to(self.previous_boundary(self.cursor_offset()), cx);
         } else {
@@ -97,6 +135,9 @@ impl TextField {
     }
 
     fn right(&mut self, _: &Right, _: &mut Window, cx: &mut Context<Self>) {
+        if self.gated() {
+            return;
+        }
         if self.selected_range.is_empty() {
             self.move_to(self.next_boundary(self.selected_range.end), cx);
         } else {
@@ -105,27 +146,45 @@ impl TextField {
     }
 
     fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
+        if self.gated() {
+            return;
+        }
         self.select_to(self.previous_boundary(self.cursor_offset()), cx);
     }
 
     fn select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
+        if self.gated() {
+            return;
+        }
         self.select_to(self.next_boundary(self.cursor_offset()), cx);
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        if self.gated() {
+            return;
+        }
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx)
     }
 
     fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
+        if self.gated() {
+            return;
+        }
         self.move_to(0, cx);
     }
 
     fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
+        if self.gated() {
+            return;
+        }
         self.move_to(self.content.len(), cx);
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
+        if self.gated() {
+            return;
+        }
         if self.selected_range.is_empty() {
             self.select_to(self.previous_boundary(self.cursor_offset()), cx)
         }
@@ -133,6 +192,9 @@ impl TextField {
     }
 
     fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
+        if self.gated() {
+            return;
+        }
         if self.selected_range.is_empty() {
             self.select_to(self.next_boundary(self.cursor_offset()), cx)
         }
@@ -145,6 +207,9 @@ impl TextField {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.gated() {
+            return;
+        }
         self.is_selecting = true;
         if event.modifiers.shift {
             self.select_to(self.index_for_mouse_position(event.position), cx);
@@ -158,6 +223,9 @@ impl TextField {
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.gated() {
+            return;
+        }
         if self.is_selecting {
             self.select_to(self.index_for_mouse_position(event.position), cx);
         }
@@ -169,16 +237,25 @@ impl TextField {
         window: &mut Window,
         _: &mut Context<Self>,
     ) {
+        if self.gated() {
+            return;
+        }
         window.show_character_palette();
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        if self.gated() {
+            return;
+        }
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             self.replace_text_in_range(None, &text.replace("\n", " "), window, cx);
         }
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        if self.gated() {
+            return;
+        }
         if !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
@@ -187,6 +264,9 @@ impl TextField {
     }
 
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
+        if self.gated() {
+            return;
+        }
         if !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
@@ -336,6 +416,9 @@ impl EntityInputHandler for TextField {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.gated() {
+            return;
+        }
         let range = range_utf16
             .as_ref()
             .map(|range_utf16| self.range_from_utf16(range_utf16))
@@ -480,17 +563,20 @@ impl Element for TextFieldElement {
         let selected_range = input.selected_range.clone();
         let cursor = input.cursor_offset();
         let style = window.text_style();
+        // 文本色统一取全局色板：暗色主题白字高对比（修复继承黑字不可读），
+        // placeholder 弱化、光标 accent、选区 accent 软色 —— 明暗随壳联动
+        let pal = current_palette(cx);
 
         let (display_text, text_color) = if content.is_empty() {
-            (input.placeholder.clone(), gpui::hsla(0.0, 0.0, 0.62, 1.0))
+            (input.placeholder.clone(), pal.text_dim)
         } else {
-            (content, style.color)
+            (content, pal.text)
         };
 
         let run = TextRun {
             len: display_text.len(),
             font: style.font(),
-            color: text_color,
+            color: text_color.into(),
             background_color: None,
             underline: None,
             strikethrough: None,
@@ -536,7 +622,7 @@ impl Element for TextFieldElement {
                         point(bounds.left() + cursor_pos, bounds.top()),
                         size(px(1.5), bounds.bottom() - bounds.top()),
                     ),
-                    rgb(0x9bb6ff),
+                    pal.accent,
                 )),
             )
         } else {
@@ -552,8 +638,8 @@ impl Element for TextFieldElement {
                             bounds.bottom(),
                         ),
                     ),
-                    // 半透明品牌蓝（rgba 32bit：RRGGBBAA）
-                    gpui::rgba(0x4f7cff4d),
+                    // accent 软色选区（明：半透黑 / 暗：半透白，主题自适配）
+                    soft(pal.accent, 0.28),
                 )),
                 None,
             )
@@ -609,14 +695,33 @@ impl Element for TextFieldElement {
 }
 
 impl Render for TextField {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let instance_id = self.instance_id.clone();
+        // 统一输入框视觉（全链路只此一处定义，页面禁止自绘输入外壳）：
+        // 底色 surface_muted / 1px 描边 border / 圆角 8 / 焦点态 accent_border 描边 +
+        // surface 底 / 禁用态 50% 透明度与默认光标 —— 色板随壳主题联动
+        let pal = current_palette(cx);
+        let focused = !self.disabled && self.focus_handle.is_focused(window);
+        let disabled = self.disabled;
+        let (border, bg, text_color) = if disabled {
+            (pal.separator, pal.bg_subtle, pal.text_dim)
+        } else if focused {
+            (pal.accent_border, pal.surface, pal.text)
+        } else {
+            (pal.border, pal.surface_muted, pal.text)
+        };
+
         div()
             .id(instance_id)
             .flex()
             .key_context("TextField")
             .track_focus(&self.focus_handle(cx))
-            .cursor(CursorStyle::IBeam)
+            // 禁用态不出 IBeam 光标
+            .cursor(if disabled {
+                CursorStyle::Arrow
+            } else {
+                CursorStyle::IBeam
+            })
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::left))
@@ -634,13 +739,24 @@ impl Render for TextField {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .line_height(px(22.0))
-            .text_size(px(13.0))
+            // 视觉外壳：占满父宽（表单内弹性布局），高度/圆角/描边全局统一
+            .items_center()
+            .text_size(px(INPUT_FONT))
+            .line_height(px(20.0))
+            .text_color(text_color)
             .child(
                 div()
-                    .h(px(30.0))
                     .w_full()
-                    .p(px(4.0))
+                    .h(px(INPUT_HEIGHT))
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .rounded(px(INPUT_RADIUS))
+                    .border_1()
+                    .border_color(border)
+                    .bg(bg)
+                    // 禁用态整体降透明（含文本），焦点态由描边 + 光标呈现
+                    .when(disabled, |s| s.opacity(0.5))
                     .child(TextFieldElement { input: cx.entity() }),
             )
     }

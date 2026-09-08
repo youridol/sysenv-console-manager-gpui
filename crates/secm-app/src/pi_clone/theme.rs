@@ -133,3 +133,33 @@ impl Palette {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// 全局外观（GPUI Global）
+// ---------------------------------------------------------------------------
+
+/// 当前外观全局态：壳启动/切主题时写入。
+/// 供无实体依赖的全局组件（Toast 泡泡、TextField 输入框等）在 render 期直接
+/// 读取 —— 免去向每个子实体逐一广播 set_appearance（页面实体仍走原联动链）。
+#[derive(Debug, Clone, Copy)]
+pub struct ThemeGlobal {
+    pub appearance: Appearance,
+}
+
+impl gpui::Global for ThemeGlobal {}
+
+impl ThemeGlobal {
+    /// 写入全局外观（壳启动与 toggle_theme 时调用；后续渲染帧即生效）
+    pub fn set(appearance: Appearance, cx: &mut gpui::App) {
+        cx.set_global(Self { appearance });
+    }
+}
+
+/// 当前生效色板：优先读全局外观，未初始化时按深色兜底（启动首帧前安全）。
+pub fn current_palette(cx: &gpui::App) -> Palette {
+    let appearance = cx
+        .try_global::<ThemeGlobal>()
+        .map(|g| g.appearance)
+        .unwrap_or(Appearance::Dark);
+    Palette::for_appearance(appearance)
+}

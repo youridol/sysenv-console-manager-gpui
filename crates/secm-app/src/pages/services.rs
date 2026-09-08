@@ -1,8 +1,9 @@
 // secm-app::pages::services — 服务管理页
-// 枚举 Windows 服务 + 搜索 + 启停/启动类型。
+// 枚举 Windows 服务 + 搜索 + 启停（停止二次确认）+ 启动类型（自动/手动/禁用）。
 //
 // 并发模型：服务枚举（数百服务，慢）后台线程执行；启停/启动类型为系统 API
-// 调用，后台执行 + 完成后延迟后台刷新状态。主线程仅渲染。
+// 调用，后台执行 + 完成后延迟后台刷新状态。写操作全局互斥（busy）；
+// 主线程仅渲染。UI 反馈：全局 Toast + 状态横幅 + 日志流。
 //
 // 呈现层：统一接入 crate::ui::page 布局框架，色板取自 pi_clone::theme::Palette
 // （明暗双主题，随壳 set_appearance 联动），禁止硬编码业务色。
@@ -13,10 +14,15 @@ use secm_core::settings::{self, ServiceInfo};
 
 use crate::pi_clone::theme::{Appearance, Palette};
 use crate::ui::page::{
-    banner, button_sm, card, page_header, page_root, status_pill, table_head, table_row,
-    BannerKind, ButtonKind, ColWidth,
+    banner, button_sm, card, page_header, page_root, status_pill, table_empty, table_head,
+    table_row, BannerKind, ButtonKind, ColWidth,
 };
 use crate::ui::text_input::{ChangeText, TextField};
+use crate::ui::toast;
+
+/// 启动类型三档（value 与后端 set_service_start_type 参数契约一致）
+const START_TYPE_CHOICES: &[(&str, &str)] =
+    &[("auto", "自动"), ("manual", "手动"), ("disabled", "禁用")];
 
 pub struct ServicesView {
     services: Vec<ServiceInfo>,
@@ -25,10 +31,12 @@ pub struct ServicesView {
     status: SharedString,
     /// 列表加载中
     loading: bool,
-    /// 操作进行中（互斥）
-    op_busy: bool,
-    /// 搜索输入框（P2：历史为静态占位文案，搜索从未接线）
+    /// 当前写操作（互斥；定位到具体服务行做 loading 视觉）
+    busy_svc: Option<(ServiceOp, String)>,
+    /// 搜索输入框（ChangeText 订阅驱动搜索）
     search_input: Entity<TextField>,
+    /// 待确认停止的服务（Some = 显示停止确认弹层）
+    confirm_stop: Option<ServiceInfo>,
     /// 页面外观，随壳主题联动
     appearance: Appearance,
     /// 页面滚动状态（GPUI 0.2 滚轮需 track_scroll 手动驱动，见 ui::page::page_root）
@@ -50,8 +58,9 @@ impl ServicesView {
             keyword: SharedString::from(""),
             status: SharedString::from("正在加载服务列表…"),
             loading: false,
-            op_busy: false,
+            busy_svc: None,
             search_input,
+            confirm_stop: None,
             appearance,
             page_scroll: gpui::ScrollHandle::new(),
         };
@@ -143,12 +152,25 @@ impl ServicesView {
         cx.notify();
     }
 
+    /// 该服务行是否操作中（对应行按钮 loading 禁点视觉）
+    fn row_busy(&self, name: &str) -> bool {
+        match &self.busy_svc {
+            Some((_, n)) => n == name,
+            None => false,
+        }
+    }
+
+    /// 任意写操作进行中（全局互斥：同时只允许一个系统写操作）
+    fn any_busy(&self) -> bool {
+        self.busy_svc.is_some()
+    }
+
     /// 启停/启动类型（后台系统 API + 延迟刷新）
     fn op_service(&mut self, name: &str, op: ServiceOp, cx: &mut Context<Self>) {
-        if self.op_busy {
+        if self.any_busy() {
             return;
         }
-        self.op_busy = true;
+        self.busy_svc = Some((op, name.to_string()));
         self.status = SharedString::from(format!("正在{} {}…", op.label(), name));
         cx.notify();
 
@@ -184,15 +206,22 @@ impl ServicesView {
                 }
                 if let Some(view) = weak.upgrade() {
                     view.update(cx, |this, cx| {
-                        this.op_busy = false;
-                        this.status = match result {
-                            Ok(msg) => SharedString::from(msg),
-                            Err(e) => SharedString::from(e),
-                        };
+                        this.busy_svc = None;
+                        // 全局泡泡提示：服务操作结果随屏可见
+                        match &result {
+                            Ok(msg) => {
+                                toast::success(format!("服务 {}{}", name_log, op_label), cx);
+                                this.status = SharedString::from(msg.clone());
+                            }
+                            Err(e) => {
+                                toast::error(
+                                    format!("{}服务 {} 失败：{}", op_label, name_log, e),
+                                    cx,
+                                );
+                                this.status = SharedString::from(e.clone());
+                            }
+                        }
                         cx.notify();
-                    })
-                    .ok();
-                    view.update(cx, |this, cx| {
                         // 延迟后台刷新（服务状态异步变化）
                         this.reload_later(cx);
                     })
@@ -213,8 +242,8 @@ impl ServicesView {
     }
 }
 
-#[derive(Clone, Copy)]
-#[allow(dead_code)] // 启动类型切换按钮待接入 UI
+/// 服务操作类型
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ServiceOp {
     Start,
     Stop,
@@ -235,20 +264,33 @@ impl ServiceOp {
     }
 }
 
+/// 启动类型显示文本 → 契约值（无法识别 → None：三档均不高亮，仅可选）
+fn start_type_value(start_type: &str) -> Option<&'static str> {
+    match start_type {
+        "自动" => Some("auto"),
+        "手动" => Some("manual"),
+        "已禁用" | "禁用" => Some("disabled"),
+        _ => None,
+    }
+}
+
 impl Render for ServicesView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = self.pal();
         let services = self.filtered();
 
-        page_root(&pal, "services-page-root", &self.page_scroll, &cx.entity())
+        let content = page_root(&pal, "services-page-root", &self.page_scroll, &cx.entity())
             // 页头（标题+副标题）+ 右侧搜索框
             .child(
                 page_header(
                     &pal,
                     "服务管理",
-                    format!("{} 个服务 · Windows 服务枚举", self.services.len()),
+                    format!(
+                        "{} 个服务 · 启动类型可设自动/手动/禁用（需管理员权限）",
+                        self.services.len()
+                    ),
                 )
-                .child(self.search_box(&pal)),
+                .child(self.search_box()),
             )
             // 状态消息（非空才显示）
             .when(!self.status.is_empty(), |s| {
@@ -266,44 +308,79 @@ impl Render for ServicesView {
                         .child(table_head(
                             &pal,
                             &[
-                                ("状态", ColWidth::Px(80.0)),
+                                ("状态", ColWidth::Px(76.0)),
                                 ("服务名", ColWidth::Flex),
-                                ("显示名", ColWidth::Px(260.0)),
-                                ("启动类型", ColWidth::Px(90.0)),
-                                ("操作", ColWidth::Px(120.0)),
+                                ("显示名", ColWidth::Px(240.0)),
+                                ("启动类型", ColWidth::Px(190.0)),
+                                ("操作", ColWidth::Px(104.0)),
                             ],
                         ))
+                        .when(!self.loading && services.is_empty(), |s| {
+                            s.child(table_empty(
+                                &pal,
+                                "未枚举到服务（可能权限不足或服务控制台不可用）",
+                            ))
+                        })
                         .children(services.iter().map(|s| self.service_row(&pal, s, cx))),
                 ),
-            )
+            );
+
+        // 停止确认弹层（模态；对齐上游 AlertDialog 语义）
+        if let Some(svc) = self.confirm_stop.clone() {
+            let modal = confirm_modal(
+                &pal,
+                "svc-stop-backdrop",
+                format!("停止服务 {}", svc.name),
+                format!(
+                    "将停止系统服务「{}」。部分服务停止后可能导致相关功能不可用，需管理员权限，请确认后继续。",
+                    svc.display_name
+                ),
+                "确认停止",
+                ButtonKind::Danger,
+                cx.listener(move |this, _, _, cx| {
+                    let name = svc.name.clone();
+                    this.confirm_stop = None;
+                    this.op_service(&name, ServiceOp::Stop, cx);
+                }),
+                cx.listener(|this, _, _, cx| {
+                    this.confirm_stop = None;
+                    cx.notify();
+                }),
+            );
+            div()
+                .relative()
+                .size_full()
+                .child(content)
+                .child(gpui::deferred(modal))
+                .into_any_element()
+        } else {
+            div()
+                .relative()
+                .size_full()
+                .child(content)
+                .into_any_element()
+        }
     }
 }
 
+use crate::ui::page::confirm_modal;
+
 impl ServicesView {
-    /// 页头右侧搜索框（保留 search_input 实体与 🔍 结构）
-    fn search_box(&self, pal: &Palette) -> impl IntoElement {
+    /// 页头右侧搜索框（视觉外壳由 TextField 统一提供，页面不再包一层边框底色）
+    fn search_box(&self) -> impl IntoElement {
         div()
             .id("svc-search")
             .flex()
             .items_center()
-            .gap_2()
-            .px_3()
-            .py_1p5()
-            .rounded(px(8.0))
-            .border_1()
-            .border_color(pal.border)
-            .bg(pal.bg_hover)
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .text_color(pal.text_muted)
-                    .child("🔍"),
-            )
-            // 真实输入框（P2：搜索功能接线）
-            .child(div().flex_1().child(self.search_input.clone()))
+            .w(px(220.0))
+            .max_w(px(320.0))
+            .min_w(px(140.0))
+            .flex_shrink_0()
+            // 真实输入框（统一视觉外壳；ChangeText 订阅驱动搜索）
+            .child(self.search_input.clone())
     }
 
-    /// 单行服务数据（单元格列宽与表头完全一致：80/Flex/260/90/120）
+    /// 单行服务数据（单元格列宽与表头完全一致：76/Flex/240/190/104）
     fn service_row(
         &self,
         pal: &Palette,
@@ -315,6 +392,24 @@ impl ServicesView {
         let display = s.display_name.clone();
         let start_type = s.start_type.clone();
         let color = Self::status_color(&status, pal);
+        let running = status == "Running";
+        let row_busy = self.row_busy(&name);
+        let any_busy = self.any_busy();
+        // 停止/启动按行互斥：本行操作中禁点；其他行在全局互斥期间同样禁点
+        let action_disabled = row_busy || any_busy;
+        let current_type = start_type_value(&start_type);
+        // 启动类型操作中：本行三档禁点（其余行按全局互斥禁点）
+        let type_busy = self
+            .busy_svc
+            .as_ref()
+            .map(|(op, n)| {
+                n == name.as_str()
+                    && matches!(
+                        op,
+                        ServiceOp::ToggleAuto | ServiceOp::ToggleManual | ServiceOp::ToggleDisable
+                    )
+            })
+            .unwrap_or(false);
 
         table_row(pal)
             .id(SharedString::from(format!("svc-{}", name.clone())))
@@ -322,79 +417,97 @@ impl ServicesView {
             .child(
                 div()
                     .flex_none()
-                    .w(px(80.0))
+                    .w(px(76.0))
                     .child(status_pill(pal, status.clone(), color)),
             )
-            // 服务名（Flex 自适应）
+            // 服务名（Flex 自适应；单行省略防溢出）
             .child(
                 div()
                     .flex_1()
                     .min_w(px(0.0))
+                    .whitespace_nowrap()
+                    .truncate()
                     .text_size(px(12.5))
                     .text_color(pal.text)
                     .child(name.clone()),
             )
-            // 显示名（固定宽）
+            // 显示名（固定宽；单行省略防溢出挤压后续列）
             .child(
                 div()
                     .flex_none()
-                    .w(px(260.0))
+                    .w(px(240.0))
+                    .whitespace_nowrap()
+                    .truncate()
                     .text_size(px(12.0))
                     .text_color(pal.text_muted)
                     .child(display),
             )
-            // 启动类型
+            // 启动类型（三档按钮组：当前档 accent 高亮；点击设为新档）
+            .child(div().flex_none().w(px(190.0)).flex().gap_1().children(
+                START_TYPE_CHOICES.iter().map(|(value, label)| {
+                    let is_cur = current_type == Some(*value);
+                    let op = match *value {
+                        "auto" => ServiceOp::ToggleAuto,
+                        "manual" => ServiceOp::ToggleManual,
+                        _ => ServiceOp::ToggleDisable,
+                    };
+                    let svc = name.clone();
+                    let disabled = type_busy || any_busy;
+                    div()
+                        .id(SharedString::from(format!("svc-type-{}-{}", name, value)))
+                        .px_2()
+                        .py(px(2.0))
+                        .rounded_md()
+                        .text_size(px(10.5))
+                        .when(is_cur, |s| s.bg(pal.accent).text_color(pal.accent_contrast))
+                        .when(!is_cur, |s| {
+                            s.bg(pal.bg_hover)
+                                .hover(|s| s.bg(pal.bg_selected))
+                                .text_color(pal.text)
+                        })
+                        .when(disabled, |s| s.opacity(0.55).cursor_default())
+                        .when(!disabled, |s| s.cursor_pointer())
+                        .when(!disabled && !is_cur, |s| {
+                            s.on_click(cx.listener(move |this, _, _, cx| {
+                                this.op_service(&svc, op, cx);
+                            }))
+                        })
+                        .child(label.to_string())
+                }),
+            ))
+            // 操作按钮：运行中 → 停止（危险；二次确认）；非运行 → 启动（次操作）
             .child(
                 div()
                     .flex_none()
-                    .w(px(90.0))
-                    .text_size(px(11.5))
-                    .text_color(pal.text_muted)
-                    .child(start_type),
-            )
-            // 操作按钮
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(120.0))
+                    .w(px(104.0))
                     .flex()
                     .gap_1()
-                    .child(service_action_button(
-                        pal,
-                        "启动",
-                        name.clone(),
-                        ServiceOp::Start,
-                        cx,
-                    ))
-                    .child(service_action_button(
-                        pal,
-                        "停止",
-                        name.clone(),
-                        ServiceOp::Stop,
-                        cx,
-                    )),
+                    .child(if running {
+                        let svc = name.clone();
+                        button_sm(pal, ButtonKind::Danger)
+                            .id(SharedString::from(format!("svc-stop-{}", name)))
+                            .when(action_disabled, |s| s.opacity(0.55).cursor_default())
+                            .when(!action_disabled, |s| {
+                                s.on_click(cx.listener(move |this, _, _, cx| {
+                                    // 打开停止确认弹层（破坏性操作二次确认）
+                                    this.confirm_stop =
+                                        this.services.iter().find(|s| s.name == svc).cloned();
+                                    cx.notify();
+                                }))
+                            })
+                            .child("停止")
+                    } else {
+                        let svc = name.clone();
+                        button_sm(pal, ButtonKind::Secondary)
+                            .id(SharedString::from(format!("svc-start-{}", name)))
+                            .when(action_disabled, |s| s.opacity(0.55).cursor_default())
+                            .when(!action_disabled, |s| {
+                                s.on_click(cx.listener(move |this, _, _, cx| {
+                                    this.op_service(&svc, ServiceOp::Start, cx);
+                                }))
+                            })
+                            .child("启动")
+                    }),
             )
     }
-}
-
-/// 行内操作按钮（框架 button_sm：启动=次操作 / 停止=危险；id 组合规则保持原样）
-fn service_action_button(
-    pal: &Palette,
-    label: &str,
-    svc: String,
-    op: ServiceOp,
-    cx: &mut Context<ServicesView>,
-) -> impl IntoElement {
-    // 启动类操作用次操作样式，停止类操作用危险样式（分组与原实现一致）
-    let kind = match op {
-        ServiceOp::Start | ServiceOp::ToggleAuto | ServiceOp::ToggleManual => ButtonKind::Secondary,
-        _ => ButtonKind::Danger,
-    };
-    let label_owned = label.to_string();
-    button_sm(pal, kind)
-        .id(SharedString::from(label_owned.clone() + &svc))
-        .child(label_owned)
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.op_service(&svc, op, cx);
-        }))
 }

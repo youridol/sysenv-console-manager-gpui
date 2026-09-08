@@ -10,10 +10,11 @@ use secm_core::netif::{self, AdapterConfig};
 
 use crate::pi_clone::theme::{Appearance, Palette};
 use crate::ui::page::{
-    banner, button, card, card_body, card_divider, card_header, field_label, kv_row_w, page_header,
-    page_root, status_pill, BannerKind, ButtonKind,
+    banner, button, card, card_body, card_divider, card_grid_row, card_header, field_label,
+    grid_cell, kv_row_w, page_header, page_root, status_pill, BannerKind, ButtonKind,
 };
 use crate::ui::text_input::{ChangeText, TextField};
+use crate::ui::toast;
 
 pub struct NetConfigView {
     /// 页面外观，随壳主题联动
@@ -171,7 +172,28 @@ impl NetConfigView {
         } else {
             "部分步骤失败（见下方明细）".to_string()
         };
+        // 全局泡泡提示：配置应用结果随屏可见
+        if r.all_ok {
+            toast::success("网络配置应用成功", cx);
+        } else {
+            toast::warning("网络配置部分步骤失败（见执行结果明细）", cx);
+        }
         cx.notify();
+    }
+
+    /// 批量切换修改用输入框禁用态（netsh 应用期间锁定，防中途改值产生歧义配置）
+    fn set_inputs_disabled(&self, disabled: bool, cx: &mut Context<Self>) {
+        for field in [
+            self.mac_input.clone(),
+            self.dns_input.clone(),
+            self.ipv4_input.clone(),
+            self.mask_input.clone(),
+            self.gateway_input.clone(),
+            self.ipv6_input.clone(),
+            self.ipv6_gw_input.clone(),
+        ] {
+            field.update(cx, |f, cx| f.set_disabled(disabled, cx));
+        }
     }
 
     /// 后台执行网络配置应用（netsh 串行 2-7 个进程，需数百 ms~秒级 → 绝不上主线程）
@@ -181,6 +203,7 @@ impl NetConfigView {
         }
         self.applying = true;
         self.status = "正在应用网络配置（netsh 执行中，可能需要几秒）…".to_string();
+        self.set_inputs_disabled(true, cx);
         cx.notify();
 
         let weak: WeakEntity<Self> = cx.entity().downgrade();
@@ -209,6 +232,7 @@ impl NetConfigView {
                 if let Some(view) = weak.upgrade() {
                     view.update(cx, |this, cx| {
                         this.applying = false;
+                        this.set_inputs_disabled(false, cx);
                         this.apply_result(result, cx);
                     })
                     .ok();
@@ -228,12 +252,14 @@ impl NetConfigView {
         let Some(name) = self.selected.clone() else {
             self.status = "请先选择一个网络适配器".to_string();
             log::warn!("网络配置 · 切换 DHCP 失败：未选择适配器");
+            toast::warning("请先选择一个网络适配器", cx);
             cx.notify();
             return;
         };
         if !self.admin {
             self.status = "需要管理员权限执行网络配置修改".to_string();
             log::warn!("网络配置 · 切换 DHCP 失败：需要管理员权限");
+            toast::warning("需要管理员权限执行网络配置修改", cx);
             cx.notify();
             return;
         }
@@ -258,12 +284,14 @@ impl NetConfigView {
         let Some(name) = self.selected.clone() else {
             self.status = "请先选择一个网络适配器".to_string();
             log::warn!("网络配置 · 应用静态 IPv4 失败：未选择适配器");
+            toast::warning("请先选择一个网络适配器", cx);
             cx.notify();
             return;
         };
         if !self.admin {
             self.status = "需要管理员权限执行网络配置修改".to_string();
             log::warn!("网络配置 · 应用静态 IPv4 失败：需要管理员权限");
+            toast::warning("需要管理员权限执行网络配置修改", cx);
             cx.notify();
             return;
         }
@@ -275,6 +303,7 @@ impl NetConfigView {
         if ip.trim().is_empty() || mask.trim().is_empty() {
             self.status = "请填写 IPv4 地址与子网掩码".to_string();
             log::warn!("网络配置 · 应用静态 IPv4 失败：未填写地址与掩码");
+            toast::warning("请填写 IPv4 地址与子网掩码", cx);
             cx.notify();
             return;
         }
@@ -323,12 +352,14 @@ impl NetConfigView {
         let Some(name) = self.selected.clone() else {
             self.status = "请先选择一个网络适配器".to_string();
             log::warn!("网络配置 · 应用静态 IPv6 失败：未选择适配器");
+            toast::warning("请先选择一个网络适配器", cx);
             cx.notify();
             return;
         };
         if !self.admin {
             self.status = "需要管理员权限执行网络配置修改".to_string();
             log::warn!("网络配置 · 应用静态 IPv6 失败：需要管理员权限");
+            toast::warning("需要管理员权限执行网络配置修改", cx);
             cx.notify();
             return;
         }
@@ -364,12 +395,14 @@ impl NetConfigView {
         let Some(adapter) = self.selected_adapter().cloned() else {
             self.status = "请先选择一个网络适配器".to_string();
             log::warn!("网络配置 · 修改 MAC 失败：未选择适配器");
+            toast::warning("请先选择一个网络适配器", cx);
             cx.notify();
             return;
         };
         if !self.admin {
             self.status = "需要管理员权限执行 MAC 修改".to_string();
             log::warn!("网络配置 · 修改 MAC 失败：需要管理员权限");
+            toast::warning("需要管理员权限执行 MAC 修改", cx);
             cx.notify();
             return;
         }
@@ -377,6 +410,7 @@ impl NetConfigView {
         if mac.trim().is_empty() {
             self.status = "请填写新的 MAC 地址".to_string();
             log::warn!("网络配置 · 修改 MAC 失败：未填写新 MAC");
+            toast::warning("请填写新的 MAC 地址", cx);
             cx.notify();
             return;
         }
@@ -405,12 +439,15 @@ impl NetConfigView {
             }
             if let Some(view) = weak.upgrade() {
                 view.update(cx, |this, cx| {
+                    // 全局泡泡提示：MAC 修改结果
                     match result {
                         Ok(msg) => {
+                            toast::success(format!("适配器 {} MAC 修改成功", name_v), cx);
                             this.status = msg;
                             this.steps.clear();
                         }
                         Err(e) => {
+                            toast::error(format!("适配器 {} MAC 修改失败：{}", name_v, e), cx);
                             this.status = format!("MAC 修改失败：{}", e);
                             this.steps.clear();
                         }
@@ -500,13 +537,13 @@ impl Render for NetConfigView {
             let msg = status_msg.clone();
             s.child(banner(&pal, BannerKind::Info, msg))
         })
-        // 适配器选择 + 当前配置
+        // 适配器选择 + 当前配置（全宽卡）
         .child(self.adapter_panel(&pal, cx))
-        // 修改操作
+        // 修改操作（当前配置 | IPv4 设置 一行；IPv6 | MAC 一行；容器级两列自适应）
         .when(selected_adapter.is_some(), |s| {
             s.child(self.action_panel(&pal, cx))
         })
-        // 步骤结果
+        // 步骤结果（全宽卡）
         .when(!steps.is_empty(), |s| {
             s.child(self.steps_panel(&pal, &steps))
         })
@@ -601,190 +638,195 @@ impl NetConfigView {
             )
     }
 
-    /// 修改操作区：当前配置 / IPv4 / IPv6 / MAC 四张卡
+    /// 修改操作区：当前配置 | IPv4 设置 一行两列，IPv6 | MAC 一行两列
+    /// （容器级自适应换行；netsh 应用结果经全局泡泡提示随屏可见）
     fn action_panel(&self, pal: &Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(a) = self.selected_adapter() else {
             return div().into_any_element();
         };
         let adapter = a.clone();
 
-        let mut panel = div().flex_col().gap_4();
-
         // 当前配置卡：键值信息行列表
         let ipv4s = adapter.ipv4.join(", ");
         let dns4 = adapter.ipv4_dns.join(", ");
         let ipv6 = adapter.ipv6_link_local.join(", ");
         let mac = adapter.mac.clone().unwrap_or_else(|| "—".to_string());
-        panel = panel.child(
-            card(pal)
-                .child(card_header(pal, "当前配置"))
-                .child(card_divider(pal))
-                .child(
-                    card_body(pal)
-                        .child(self.kv(pal, "接口名", &adapter.name))
-                        .child(self.kv(pal, "描述", &adapter.description))
-                        .child(self.kv(pal, "MAC 地址", &mac))
-                        .child(self.kv(pal, "IPv4", &ipv4s))
-                        .child(self.kv(pal, "IPv4 DNS", &dns4))
-                        .child(self.kv(pal, "IPv6 链路本地", &ipv6)),
-                ),
-        );
+        let cur_cfg_card = card(pal)
+            .child(card_header(pal, "当前配置"))
+            .child(card_divider(pal))
+            .child(
+                card_body(pal)
+                    .child(self.kv(pal, "接口名", &adapter.name))
+                    .child(self.kv(pal, "描述", &adapter.description))
+                    .child(self.kv(pal, "MAC 地址", &mac))
+                    .child(self.kv(pal, "IPv4", &ipv4s))
+                    .child(self.kv(pal, "IPv4 DNS", &dns4))
+                    .child(self.kv(pal, "IPv6 链路本地", &ipv6)),
+            );
 
         // IPv4 设置卡：DHCP/刷新按钮 + 地址/掩码/网关/DNS 输入 + 应用按钮
-        panel = panel.child(
-            card(pal)
-                .child(card_header(pal, "IPv4 设置"))
-                .child(card_divider(pal))
-                .child(
-                    card_body(pal)
-                        .child(
-                            div()
-                                .flex()
-                                .gap_2()
-                                .child(
-                                    button(pal, ButtonKind::Primary)
-                                        .id("nc-dhcp")
-                                        .child("切换为 DHCP（自动获取）")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.set_dhcp(cx);
-                                        })),
-                                )
-                                .child(
-                                    button(pal, ButtonKind::Secondary)
-                                        .id("nc-refresh")
-                                        .child("刷新配置")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.refresh(cx);
-                                        })),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .flex_col()
-                                        .flex_1()
-                                        .gap_1()
-                                        .child(field_label(pal, "IP 地址"))
-                                        .child(self.ipv4_input.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .flex_col()
-                                        .flex_1()
-                                        .gap_1()
-                                        .child(field_label(pal, "子网掩码"))
-                                        .child(self.mask_input.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .flex_col()
-                                        .flex_1()
-                                        .gap_1()
-                                        .child(field_label(pal, "默认网关（可选）"))
-                                        .child(self.gateway_input.clone()),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex_col()
-                                .gap_1()
-                                .child(field_label(pal, "DNS 服务器（逗号分隔；留空=DHCP）"))
-                                .child(self.dns_input.clone()),
-                        )
-                        .child(
-                            div().flex().justify_end().child(
-                                button(pal, ButtonKind::Secondary)
-                                    .id("nc-static-v4")
-                                    .child("应用静态 IPv4 + DNS")
+        let v4_card = card(pal)
+            .child(card_header(pal, "IPv4 设置"))
+            .child(card_divider(pal))
+            .child(
+                card_body(pal)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(
+                                button(pal, ButtonKind::Primary)
+                                    .id("nc-dhcp")
+                                    .child("切换 DHCP")
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.apply_static_v4(cx);
+                                        this.set_dhcp(cx);
+                                    })),
+                            )
+                            .child(
+                                button(pal, ButtonKind::Secondary)
+                                    .id("nc-refresh")
+                                    .child("刷新")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.refresh(cx);
                                     })),
                             ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_col()
+                                    .flex_1()
+                                    .min_w(px(140.0))
+                                    .gap_1()
+                                    .child(field_label(pal, "IP 地址"))
+                                    .child(self.ipv4_input.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex_col()
+                                    .flex_1()
+                                    .min_w(px(140.0))
+                                    .gap_1()
+                                    .child(field_label(pal, "子网掩码"))
+                                    .child(self.mask_input.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex_col()
+                                    .flex_1()
+                                    .min_w(px(140.0))
+                                    .gap_1()
+                                    .child(field_label(pal, "默认网关（可选）"))
+                                    .child(self.gateway_input.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_col()
+                            .gap_1()
+                            .child(field_label(pal, "DNS 服务器（逗号分隔；留空=DHCP）"))
+                            .child(self.dns_input.clone()),
+                    )
+                    .child(
+                        div().flex().justify_end().child(
+                            button(pal, ButtonKind::Secondary)
+                                .id("nc-static-v4")
+                                .child("应用 IPv4/DNS")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.apply_static_v4(cx);
+                                })),
                         ),
-                ),
-        );
+                    ),
+            );
 
         // IPv6 设置卡：地址/网关输入 + 应用按钮
-        panel = panel.child(
-            card(pal)
-                .child(card_header(pal, "IPv6 设置（静态地址/网关）"))
-                .child(card_divider(pal))
-                .child(
-                    card_body(pal)
-                        .child(
-                            div()
-                                .flex()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .flex_col()
-                                        .flex_1()
-                                        .gap_1()
-                                        .child(field_label(pal, "IPv6 地址（可选）"))
-                                        .child(self.ipv6_input.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .flex_col()
-                                        .flex_1()
-                                        .gap_1()
-                                        .child(field_label(pal, "IPv6 网关（可选）"))
-                                        .child(self.ipv6_gw_input.clone()),
-                                ),
-                        )
-                        .child(
-                            div().flex().justify_end().child(
-                                button(pal, ButtonKind::Secondary)
-                                    .id("nc-static-v6")
-                                    .child("应用静态 IPv6")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.apply_static_v6(cx);
-                                    })),
+        let v6_card = card(pal)
+            .child(card_header(pal, "IPv6 设置（静态地址/网关）"))
+            .child(card_divider(pal))
+            .child(
+                card_body(pal)
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_col()
+                                    .flex_1()
+                                    .gap_1()
+                                    .child(field_label(pal, "IPv6 地址（可选）"))
+                                    .child(self.ipv6_input.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex_col()
+                                    .flex_1()
+                                    .gap_1()
+                                    .child(field_label(pal, "IPv6 网关（可选）"))
+                                    .child(self.ipv6_gw_input.clone()),
                             ),
+                    )
+                    .child(
+                        div().flex().justify_end().child(
+                            button(pal, ButtonKind::Secondary)
+                                .id("nc-static-v6")
+                                .child("应用 IPv6")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.apply_static_v6(cx);
+                                })),
                         ),
-                ),
-        );
+                    ),
+            );
 
         // MAC 设置卡：新 MAC 输入 + 危险操作按钮
-        let mac = adapter.mac.clone().unwrap_or_default();
-        panel = panel.child(
-            card(pal)
-                .child(card_header(pal, "MAC 地址修改（高级）"))
-                .child(card_divider(pal))
-                .child(
-                    card_body(pal)
-                        .child(
-                            div()
-                                .flex_col()
-                                .gap_1()
-                                .child(field_label(pal, "新 MAC（AA:BB:CC:DD:EE:FF）"))
-                                .child(self.mac_input.clone()),
-                        )
-                        .when(!mac.is_empty(), |s| {
-                            s.child(div().text_size(px(11.0)).text_color(pal.text_muted).child(
-                                SharedString::from(format!(
-                                    "当前：{}（修改后网卡将短暂重启）",
-                                    mac
-                                )),
-                            ))
-                        })
-                        .child(
-                            div().flex().justify_end().child(
-                                button(pal, ButtonKind::Danger)
-                                    .id("nc-mac")
-                                    .child("修改 MAC")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.apply_mac(cx);
-                                    })),
-                            ),
+        let mac_card = card(pal)
+            .child(card_header(pal, "MAC 地址修改（高级）"))
+            .child(card_divider(pal))
+            .child(
+                card_body(pal)
+                    .child(
+                        div()
+                            .flex_col()
+                            .gap_1()
+                            .child(field_label(pal, "新 MAC（AA:BB:CC:DD:EE:FF）"))
+                            .child(self.mac_input.clone()),
+                    )
+                    .when(!mac.is_empty(), |s| {
+                        s.child(div().text_size(px(11.0)).text_color(pal.text_muted).child(
+                            SharedString::from(format!("当前：{}（修改后网卡将短暂重启）", mac)),
+                        ))
+                    })
+                    .child(
+                        div().flex().justify_end().child(
+                            button(pal, ButtonKind::Danger)
+                                .id("nc-mac")
+                                .child("修改 MAC")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.apply_mac(cx);
+                                })),
                         ),
-                ),
-        );
+                    ),
+            );
 
-        panel.into_any_element()
+        // 两列网格装配：当前配置 | IPv4 一行，IPv6 | MAC 一行（容器级自适应换行）
+        div()
+            .flex_col()
+            .child(
+                card_grid_row()
+                    .child(grid_cell().child(cur_cfg_card))
+                    .child(grid_cell().child(v4_card)),
+            )
+            .child(
+                card_grid_row()
+                    .child(grid_cell().child(v6_card))
+                    .child(grid_cell().child(mac_card)),
+            )
+            .into_any_element()
     }
 
     /// 步骤结果卡：逐行展示 netsh 应用结果（✓/✗ 行结构保留，仅色板化）

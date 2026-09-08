@@ -7,7 +7,9 @@ use gpui::prelude::*;
 use gpui::{div, px, Context, FontWeight, Render, Window};
 
 use crate::pi_clone::theme::{Appearance, Palette};
-use crate::ui::page::{badge, card, card_body, kv_row_w, page_body, page_header, page_root};
+use crate::ui::page::{
+    badge, card, card_body, card_grid_row, grid_cell, kv_row_w, page_body, page_header, page_root,
+};
 
 pub struct AboutView {
     /// 页面外观，随壳主题联动
@@ -68,38 +70,52 @@ impl Render for AboutView {
                 page_body()
                     // 页头：标题 + 副标题（替代原单独 24px 大标题）
                     .child(page_header(&pal, "关于", "版本 · 技术栈 · 开源许可"))
-                    // 产品卡：产品名（右侧徽标）+ 描述行
+                    // 两列网格：产品卡 | 信息卡（容器级自适应，窄区自动堆叠）
                     .child(
-                        card(&pal).child(
-                            card_body(&pal)
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .gap_3()
-                                        .child(
-                                            div()
-                                                .text_size(px(17.0))
-                                                .font_weight(FontWeight::BOLD)
-                                                .text_color(pal.text)
-                                                .child("SysEnv Console Manager"),
-                                        )
-                                        .child(badge(&pal, "GPUI 重构版", pal.accent)),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(12.5))
-                                        .text_color(pal.text_muted)
-                                        .child("Windows 10/11 系统环境管理工具 — 纯 Rust + GPUI"),
+                        card_grid_row()
+                            .child(
+                                grid_cell().child(
+                                    // 产品卡：产品名（右侧徽标）+ 描述行
+                                    card(&pal).child(
+                                        card_body(&pal)
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .gap_3()
+                                                    .child(
+                                                        div()
+                                                            .text_size(px(17.0))
+                                                            .font_weight(FontWeight::BOLD)
+                                                            .text_color(pal.text)
+                                                            .child("SysEnv Console Manager"),
+                                                    )
+                                                    .child(badge(&pal, "GPUI 重构版", pal.accent)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(12.5))
+                                                    .text_color(pal.text_muted)
+                                                    .child(
+                                                        "Windows 10/11 系统环境管理工具 — 纯 Rust + GPUI",
+                                                    ),
+                                            ),
+                                    ),
                                 ),
-                        ),
-                    )
-                    // 信息卡：键值信息行（标签定宽 110）
-                    .child(
-                        card(&pal).child(card_body(&pal).children(info_rows.iter().map(|(k, v)| {
-                            kv_row_w(&pal, 110.0, *k, *v)
-                        }))),
+                            )
+                            .child(
+                                grid_cell().child(
+                                    // 信息卡：键值信息行（标签定宽 110）
+                                    card(&pal).child(
+                                        card_body(&pal).children(
+                                            info_rows.iter().map(|(k, v)| {
+                                                kv_row_w(&pal, 110.0, *k, *v)
+                                            }),
+                                        ),
+                                    ),
+                                ),
+                            ),
                     )
                     // 底部备注（原文案保留）
                     .child(

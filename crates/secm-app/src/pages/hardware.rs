@@ -12,6 +12,7 @@ use crate::ui::page::{
     banner, button, card, page_header, page_root, status_pill, table_empty, table_head, table_row,
     BannerKind, ButtonKind, ColWidth,
 };
+use crate::ui::toast;
 
 pub struct HardwareView {
     disks: Vec<DiskListItem>,
@@ -131,6 +132,8 @@ impl HardwareView {
                             this.smart.insert(id.clone(), smart_view);
                         }
                         Err(e) => {
+                            // 全局泡泡提示：SMART 读取失败随屏可见
+                            toast::error(format!("读取磁盘 {} S.M.A.R.T 失败：{}", id, e), cx);
                             this.error = format!("读取磁盘 {} S.M.A.R.T 失败：{}", id, e);
                         }
                     }
@@ -186,7 +189,7 @@ impl Render for HardwareView {
                         .child(if loading_disks {
                             "检测中…"
                         } else {
-                            "刷新磁盘列表"
+                            "刷新"
                         })
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.refresh(cx);

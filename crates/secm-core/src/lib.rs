@@ -7,12 +7,16 @@ pub mod environment;
 pub mod error;
 pub mod game_env;
 pub mod hardware;
+// 高精度计时器（bcdedit 三条目；系统设置页「系统类」开关）
+pub mod hpt;
 pub mod logger;
 pub mod net_config;
 pub mod net_diag;
 pub mod net_info;
 pub mod netif;
 pub mod network;
+// NVIDIA 显卡电源管理模式（NVAPI DRS；系统设置页三档选择）
+pub mod nvidia_drs;
 pub mod proc_util;
 pub mod sensor;
 pub mod sensor_history;

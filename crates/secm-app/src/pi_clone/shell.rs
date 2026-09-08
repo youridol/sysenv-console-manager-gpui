@@ -26,12 +26,13 @@ use crate::pages::net_config::NetConfigView;
 use crate::pages::network::NetworkView;
 use crate::pages::services::ServicesView;
 use crate::pages::settings::SettingsView;
+use crate::ui::toast::{self, ToastEvent, ToastHost};
 
 use super::icons::{self, Icon};
 use super::layout;
 use super::nav::SecmPage;
 use super::panel::{GrowDirection, PanelWidth};
-use super::theme::{Appearance, Palette};
+use super::theme::{Appearance, Palette, ThemeGlobal};
 
 use secm_core::logger::{LogBuffer, LogEntry};
 
@@ -61,6 +62,8 @@ pub struct PiShell {
     pub net_info: Option<secm_core::net_info::NetInfo>,
     /// 网络信息卡读取中（后台采集未回）
     pub net_info_loading: bool,
+    /// 全局泡泡提示宿主（右上角 Toast；页面经 ui::toast::success 等推送）
+    toast_host: Entity<ToastHost>,
 }
 
 /// 10 页实体 + 可见性标志（dashboard 轮询门控；日志已迁右栏流面板，不再有页实体）
@@ -107,6 +110,16 @@ impl PageEntities {
 
 impl PiShell {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        // 全局泡泡提示：宿主实体 + 全局句柄（页面任意 Context 可推送）；
+        // 订阅队列变更驱动壳重绘（泡泡层由 render_shell 顶层装配）
+        let toast_host = toast::init(cx);
+        cx.subscribe(&toast_host, |_, _, _: &ToastEvent, cx| {
+            cx.notify();
+        })
+        .detach();
+        // 全局外观初值（Toast/TextField 等无实体依赖组件按需读取）
+        ThemeGlobal::set(Appearance::Dark, cx);
+
         let mut this = Self {
             appearance: Appearance::Dark,
             sidebar_open: true,
@@ -136,6 +149,7 @@ impl PiShell {
             ip_loading: false,
             net_info: None,
             net_info_loading: false,
+            toast_host,
         };
         this.ensure_page(SecmPage::Dashboard, cx);
         log::info!("界面壳就绪：三栏布局 + 右侧日志流面板");
@@ -270,6 +284,8 @@ impl PiShell {
                 "浅色"
             }
         );
+        // 全局外观同步：Toast/TextField 等无实体依赖组件（按需读 ThemeGlobal）
+        ThemeGlobal::set(self.appearance, cx);
         // 主题联动：向全部已实例化页面实体同步外观（懒加载页由 ensure_page 取当前外观）
         let appearance = self.appearance;
         if let Some(e) = self.pages.dashboard.as_ref() {
@@ -1181,7 +1197,11 @@ impl PiShell {
                     .left_0()
                     .right_0()
                     .bottom_0()
-                    .child(self.current_page_view()),
+                    .child(self.current_page_view())
+                    // 全局泡泡提示层：钉在中间显示区（Main 列页面区）右上角——
+                    // 本容器为定位上下文（absolute），泡泡栈作为其最后子元素绘制在最上；
+                    // 覆盖层本体无事件监听，空白处点击穿透（不再覆盖侧栏/右栏）
+                    .child(toast::render_stack(&self.toast_host, cx)),
             )
     }
 

@@ -16,9 +16,10 @@ use secm_core::environment::{self, AiExtension, AiTool, McpServerInfo, NpmEnviro
 
 use crate::pi_clone::theme::{Appearance, Palette};
 use crate::ui::page::{
-    banner, button, button_sm, card, card_body, card_divider, card_header, kv_row_w, page_header,
-    page_root, table_empty, BannerKind, ButtonKind,
+    banner, button, button_sm, card, card_body, card_divider, card_grid_row, card_header,
+    grid_cell, kv_row_w, page_header, page_root, table_empty, BannerKind, ButtonKind,
 };
+use crate::ui::toast;
 
 /// 检测区（每组独立加载状态，可并发）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,10 +240,28 @@ impl AiEnvironmentView {
                 if let Some(view) = weak.upgrade() {
                     view.update(cx, |this, cx| {
                         this.action_busy = false;
-                        this.status = match &result {
-                            Ok(msg) => msg.clone(),
-                            Err(e) => format!("{}：{}", action.label(), e),
-                        };
+                        // 全局泡泡提示：工具操作结果随屏可见
+                        match &result {
+                            Ok(msg) => {
+                                toast::success(
+                                    format!(
+                                        "{} {} 成功：{}",
+                                        action.label(),
+                                        action.package(),
+                                        msg
+                                    ),
+                                    cx,
+                                );
+                                this.status = msg.clone();
+                            }
+                            Err(e) => {
+                                toast::error(
+                                    format!("{} {} 失败：{}", action.label(), action.package(), e),
+                                    cx,
+                                );
+                                this.status = format!("{}：{}", action.label(), e);
+                            }
+                        }
                         cx.notify();
                     })
                     .ok();
@@ -301,10 +320,28 @@ impl AiEnvironmentView {
                 if let Some(view) = weak.upgrade() {
                     view.update(cx, |this, cx| {
                         this.action_busy = false;
-                        this.status = match &result {
-                            Ok(msg) => msg.clone(),
-                            Err(e) => format!("{}：{}", action.label(), e),
-                        };
+                        // 全局泡泡提示：MCP 操作结果随屏可见
+                        match &result {
+                            Ok(msg) => {
+                                toast::success(
+                                    format!(
+                                        "{} {} 成功：{}",
+                                        action.label(),
+                                        action.package(),
+                                        msg
+                                    ),
+                                    cx,
+                                );
+                                this.status = msg.clone();
+                            }
+                            Err(e) => {
+                                toast::error(
+                                    format!("{} {} 失败：{}", action.label(), action.package(), e),
+                                    cx,
+                                );
+                                this.status = format!("{}：{}", action.label(), e);
+                            }
+                        }
                         cx.notify();
                     })
                     .ok();
@@ -410,27 +447,17 @@ impl Render for AiEnvironmentView {
             let msg = status.clone();
             s.child(banner(&pal, BannerKind::Info, msg))
         })
-        // npm 环境卡
-        .child(self.npm_card(&pal, &npm, cx))
-        // AI 工具卡
-        .child(self.tools_card(&pal, &tools, action_busy, cx))
-        // MCP 卡 + 扩展卡双列（flex 等宽两列；禁 grid —— taffy grid 滚动容器内不渲染）
+        // 两列网格：npm 环境 | AI 工具（容器级自适应，窄区自动堆叠）
         .child(
-            div()
-                .flex()
-                .gap_4()
-                .child(div().flex_1().min_w(px(0.0)).child(self.mcp_card(
-                    &pal,
-                    &mcps,
-                    action_busy,
-                    cx,
-                )))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .child(self.ext_card(&pal, &extensions, cx)),
-                ),
+            card_grid_row()
+                .child(grid_cell().child(self.npm_card(&pal, &npm, cx)))
+                .child(grid_cell().child(self.tools_card(&pal, &tools, action_busy, cx))),
+        )
+        // 两列网格：MCP 服务器 | Skills/扩展（容器级自适应，窄区自动堆叠）
+        .child(
+            card_grid_row()
+                .child(grid_cell().child(self.mcp_card(&pal, &mcps, action_busy, cx)))
+                .child(grid_cell().child(self.ext_card(&pal, &extensions, cx))),
         )
     }
 }

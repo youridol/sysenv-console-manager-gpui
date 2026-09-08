@@ -521,7 +521,7 @@ impl DashboardView {
                     .child(
                         button_sm(pal, ButtonKind::Secondary)
                             .id("dash-disk-refresh")
-                            .child("刷新磁盘与 SMART")
+                            .child("刷新磁盘")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.refresh_disks(cx);
                             })),

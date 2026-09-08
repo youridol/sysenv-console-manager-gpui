@@ -28,6 +28,7 @@ use crate::ui::page::{
     page_header, page_root, soft, table_empty, BannerKind, ButtonKind,
 };
 use crate::ui::text_input::{ChangeText, TextField};
+use crate::ui::toast;
 
 /// 单工具页内输出容量（超出丢弃最旧，防内存/渲染膨胀；全程已落盘日志流不受影响）
 const OUT_LINES_CAP: usize = 2000;
@@ -961,10 +962,11 @@ impl NetworkView {
         .detach();
     }
 
-    /// 保存自定义站点（持久化 + 日志；失败明示）
+    /// 保存自定义站点（持久化 + 日志；失败明示 + 全局泡泡）
     fn persist_sites(&mut self, cx: &mut Context<Self>) {
         if let Err(e) = diag::sites::save_sites(&self.custom_sites) {
             log::warn!("网络诊断 · 网站测试 · 站点持久化失败：{e}");
+            toast::error(format!("站点列表保存失败：{e}"), cx);
         } else {
             log::info!(
                 "网络诊断 · 网站测试 · 站点列表已保存（{} 条自定义）",
@@ -980,6 +982,7 @@ impl NetworkView {
         let url = self.new_url.read(cx).value().trim().to_string();
         if name.is_empty() || url.is_empty() {
             log::warn!("网络诊断 · 网站测试 · 添加失败：名称与 URL 均不能为空");
+            toast::warning("名称与 URL 均不能为空", cx);
             cx.notify();
             return;
         }
@@ -990,6 +993,7 @@ impl NetworkView {
         self.persist_sites(cx);
         self.adding = false;
         log::info!("网络诊断 · 网站测试 · 已添加站点「{name}」{url}");
+        toast::success(format!("已添加站点「{name}」"), cx);
         cx.notify();
     }
 
@@ -1003,6 +1007,7 @@ impl NetworkView {
         let Some(idx) = edit.idx else { return };
         if name.is_empty() || url.is_empty() {
             log::warn!("网络诊断 · 网站测试 · 编辑失败：名称与 URL 均不能为空");
+            toast::warning("名称与 URL 均不能为空", cx);
             cx.notify();
             return;
         }
@@ -1015,6 +1020,7 @@ impl NetworkView {
             // 旧 URL 的状态缓存一并清理
             self.site_status.remove(&old_url);
             log::info!("网络诊断 · 网站测试 · 已更新站点「{name}」→ {url}");
+            toast::success(format!("已更新站点「{name}」"), cx);
             self.persist_sites(cx);
         }
         cx.notify();
@@ -1027,6 +1033,7 @@ impl NetworkView {
             self.custom_sites.remove(idx);
             self.site_status.remove(&url);
             log::info!("网络诊断 · 网站测试 · 已删除站点「{name}」{url}");
+            toast::info(format!("已删除站点「{name}」"), cx);
             self.persist_sites(cx);
         }
         cx.notify();
@@ -1056,6 +1063,7 @@ impl Render for NetworkView {
                 )
                 .child(
                     div()
+                        .flex_shrink_0()
                         .text_size(px(12.0))
                         .text_color(if running > 0 {
                             pal.accent
