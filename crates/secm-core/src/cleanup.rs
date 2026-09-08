@@ -1,5 +1,7 @@
-// secm-core::cleanup — 清理优化与进程管理（对齐源 v1.19.0 cleanup.rs）
-// Phase 3 首批：进程列表（sysinfo Top 200）、优先级设置（FFI）、DNS 刷新。
+// secm-core::cleanup — 清理优化与进程管理（对齐上游 /cleanup：v1.19.0 cleanup.rs + Cleanup.tsx）
+// 能力面：进程列表（sysinfo Top 200 + 名称/PID 过滤）、6 档优先级（FFI）、DNS 刷新
+// （dnsapi.DnsFlushResolverCache）、临时文件/着色器缓存清理（占用文件标记重启后删除）、
+// 工作集修剪（需管理员）。
 
 use serde::Serialize;
 use std::path::PathBuf;
@@ -61,9 +63,32 @@ pub fn list_processes() -> Vec<ProcessInfo> {
     procs
 }
 
-/// 设置进程优先级
+/// 进程过滤（名称或 PID 匹配，名称大小写不敏感；空关键词恒匹配）
+/// 对齐上游 Cleanup.tsx：`p.name.toLowerCase().includes(kw) || String(p.pid).includes(kw)`
+pub fn process_matches(p: &ProcessInfo, keyword: &str) -> bool {
+    let kw = keyword.trim();
+    if kw.is_empty() {
+        return true;
+    }
+    p.name.to_lowercase().contains(&kw.to_lowercase()) || p.pid.to_string().contains(kw)
+}
+
+/// 6 档进程优先级常量（(档位 id, 中文名)；UI 行内按钮按此渲染，
+/// 与 set_process_priority 的 Win32 映射共用同一 id —— 单一真源防档位脱节）
+pub const PRIORITY_LEVELS: [(&str, &str); 6] = [
+    ("idle", "低"),
+    ("below_normal", "较低"),
+    ("normal", "标准"),
+    ("above_normal", "较高"),
+    ("high", "高"),
+    ("realtime", "实时"),
+];
+
+/// 设置进程优先级（6 档：见 PRIORITY_LEVELS）
 /// Valid priorities: idle, below_normal, normal, above_normal, high, realtime
 pub fn set_process_priority(pid: u32, priority: &str) -> CleanupResult {
+    // operation 携带 PID（对齐上游 "设置进程优先级 (PID={})"），保证追溯日志可定位目标进程
+    let operation = format!("设置进程优先级 (PID={})", pid);
     const PROCESS_SET_INFORMATION: u32 = 0x0200;
     let priority_class: u32 = match priority.to_lowercase().as_str() {
         "idle" => 0x0000_0040,
@@ -74,7 +99,7 @@ pub fn set_process_priority(pid: u32, priority: &str) -> CleanupResult {
         "realtime" => 0x0000_0100,
         other => {
             return CleanupResult::err(
-                "设置优先级",
+                &operation,
                 format!(
                     "无效的优先级: {}（可选 idle/below_normal/normal/above_normal/high/realtime）",
                     other
@@ -98,7 +123,7 @@ pub fn set_process_priority(pid: u32, priority: &str) -> CleanupResult {
             let handle = OpenProcess(PROCESS_SET_INFORMATION, 0, pid);
             if handle.is_null() {
                 return CleanupResult::err(
-                    "设置优先级",
+                    &operation,
                     format!("无法打开进程 {}（可能不存在或权限不足）", pid),
                 );
             }
@@ -106,14 +131,14 @@ pub fn set_process_priority(pid: u32, priority: &str) -> CleanupResult {
             CloseHandle(handle);
             if ok == 0 {
                 return CleanupResult::err(
-                    "设置优先级",
+                    &operation,
                     format!("设置进程 {} 优先级失败（需管理员权限）", pid),
                 );
             }
         }
     }
     CleanupResult::ok(
-        "设置优先级",
+        &operation,
         0,
         format!("进程 {} 优先级已设为 {}", pid, priority),
     )
@@ -806,6 +831,44 @@ mod tests {
         let result = set_process_priority(99999, "invalid");
         assert!(!result.success);
         assert!(result.message.contains("无效的优先级"));
+        // operation 携带 PID（追溯可定位目标进程）
+        assert_eq!(result.operation, "设置进程优先级 (PID=99999)");
+    }
+
+    #[test]
+    fn test_process_matches_name_and_pid() {
+        // 名称/PID 双通道过滤（对齐上游 Cleanup.tsx 语义）
+        let p = ProcessInfo {
+            pid: 4321,
+            name: "Code.exe".to_string(),
+            memory_mb: 100.0,
+        };
+        assert!(process_matches(&p, "")); // 空关键词恒匹配
+        assert!(process_matches(&p, "  ")); // 纯空白同空
+        assert!(process_matches(&p, "code")); // 名称包含（大小写不敏感）
+        assert!(process_matches(&p, "CODE.EXE"));
+        assert!(process_matches(&p, "4321")); // PID 精确串
+        assert!(process_matches(&p, "43")); // PID 部分包含
+        assert!(!process_matches(&p, "chrome"));
+        assert!(!process_matches(&p, "999"));
+    }
+
+    #[test]
+    fn test_priority_levels_six() {
+        // 6 档常量与后端 Win32 映射一一对应（UI 单一真源）
+        assert_eq!(PRIORITY_LEVELS.len(), 6);
+        let ids: Vec<&str> = PRIORITY_LEVELS.iter().map(|(id, _)| *id).collect();
+        assert_eq!(
+            ids,
+            [
+                "idle",
+                "below_normal",
+                "normal",
+                "above_normal",
+                "high",
+                "realtime"
+            ]
+        );
     }
 
     #[test]
